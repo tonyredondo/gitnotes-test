@@ -10,7 +10,6 @@ func main() {
 	err := FetchNotes("dd_notes", "origin")
 	if err != nil {
 		fmt.Println("Error fetching notes:", err)
-		return
 	}
 
 	defer func() {
@@ -35,7 +34,6 @@ func main() {
 		note, err := GetNote("dd_notes", sha)
 		if err != nil {
 			fmt.Println("Error getting note:", err)
-			return
 		}
 		fmt.Println(sha, note)
 	}
@@ -44,7 +42,6 @@ func main() {
 	note, err := GetNote("dd_notes", "")
 	if err != nil {
 		fmt.Println("Error getting note:", err)
-		return
 	}
 	fmt.Println(note)
 
@@ -52,6 +49,5 @@ func main() {
 	err = SetNote("dd_notes", "", "This is a new note from the future: "+time.Now().String())
 	if err != nil {
 		fmt.Println("Error setting note:", err)
-		return
 	}
 }

@@ -44,11 +44,16 @@ func executeGitCommand(args ...string) (string, string, error) {
 
 // GetNote retrieves the content of a note for a specific commit SHA in a namespace.
 func GetNote(namespace, commitSha string) (string, error) {
-	if commitSha == "" {
-		return "", fmt.Errorf("commitSha cannot be empty")
-	}
 	ref := formatNamespaceRef(namespace)
-	stdout, _, err := executeGitCommand("notes", "--ref", ref, "show", commitSha)
+	var stdout string
+	var err error
+	if commitSha == "" {
+		// If commitSha is empty, we set the note for HEAD.
+		// This is a special case where we don't need to specify a commit SHA.
+		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show")
+	} else {
+		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
 	}
@@ -57,11 +62,16 @@ func GetNote(namespace, commitSha string) (string, error) {
 
 // SetNote sets (or overwrites) a note for a specific commit SHA in a namespace.
 func SetNote(namespace, commitSha, value string) error {
-	if commitSha == "" {
-		return fmt.Errorf("commitSha cannot be empty")
-	}
 	ref := formatNamespaceRef(namespace)
-	_, stderrOutput, err := executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+	var stderrOutput string
+	var err error
+	if commitSha == "" {
+		// If commitSha is empty, we set the note for HEAD.
+		// This is a special case where we don't need to specify a commit SHA.
+		stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value)
+	} else {
+		stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to set note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
 	}
