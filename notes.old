@@ -1,0 +1,329 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"reflect"
+	"strings"
+	// "time" // Only needed for the main example, not the core API
+)
+
+// formatNamespaceRef ensures the namespace has the correct prefix for git.
+// If the namespace already starts with "refs/notes/", it's returned as is.
+// Otherwise, "refs/notes/" is prepended.
+// If the namespace is empty, it uses git's default notes ref "refs/notes/commits".
+func formatNamespaceRef(namespace string) string {
+	if namespace == "" {
+		return "refs/notes/commits" // Default git notes ref
+	}
+	if strings.HasPrefix(namespace, "refs/notes/") {
+		return namespace
+	}
+	return "refs/notes/" + namespace
+}
+
+// executeGitCommand is a helper function to run git commands and capture their output and errors.
+// It returns stdout, stderr, and an error.
+func executeGitCommand(args ...string) (string, string, error) {
+	cmd := exec.Command("git", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	if err != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), nil
+}
+
+// GetNote retrieves the content of a note for a specific commit SHA in a namespace.
+func GetNote(namespace, commitSha string) (string, error) {
+	if commitSha == "" {
+		return "", fmt.Errorf("commitSha cannot be empty")
+	}
+	ref := formatNamespaceRef(namespace)
+	stdout, _, err := executeGitCommand("notes", "--ref", ref, "show", commitSha)
+	if err != nil {
+		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
+	}
+	return stdout, nil
+}
+
+// SetNote sets (or overwrites) a note for a specific commit SHA in a namespace.
+func SetNote(namespace, commitSha, value string) error {
+	if commitSha == "" {
+		return fmt.Errorf("commitSha cannot be empty")
+	}
+	ref := formatNamespaceRef(namespace)
+	_, stderrOutput, err := executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+	if err != nil {
+		return fmt.Errorf("failed to set note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
+	}
+	return nil
+}
+
+// GetNoteList retrieves a list of the content of all notes in a given namespace.
+func GetNoteList(namespace string) ([]string, error) {
+	ref := formatNamespaceRef(namespace)
+	notesList := []string{}
+
+	listOutput, _, err := executeGitCommand("notes", "--ref", ref, "list")
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "bad notes ref") || strings.Contains(errMsg, "does not exist") || strings.Contains(errMsg, "no notes found") {
+			return notesList, nil
+		}
+		return nil, fmt.Errorf("failed to list notes in %s: %w", ref, err)
+	}
+
+	if listOutput == "" {
+		return notesList, nil // No notes in this namespace
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(listOutput))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		var commitShaWithNote string
+		if len(parts) == 1 {
+			commitShaWithNote = parts[0]
+		} else if len(parts) >= 2 {
+			commitShaWithNote = parts[1]
+		} else {
+			fmt.Printf("Warning: Unexpected line format in 'git notes list' output: %s\n", line)
+			continue
+		}
+
+		noteContent, errGetNote := GetNote(namespace, commitShaWithNote)
+		if errGetNote != nil {
+			return nil, fmt.Errorf("error getting note for %s in GetNoteList: %w", commitShaWithNote, errGetNote)
+		}
+		notesList = append(notesList, noteContent)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning 'git notes list' output for %s: %w", ref, err)
+	}
+
+	return notesList, nil
+}
+
+// DeleteNote removes a note for a specific commit SHA in a namespace.
+func DeleteNote(namespace, commitSha string) error {
+	if commitSha == "" {
+		return fmt.Errorf("commitSha cannot be empty")
+	}
+	ref := formatNamespaceRef(namespace)
+	_, stderrOutput, err := executeGitCommand("notes", "--ref", ref, "remove", commitSha)
+	if err != nil {
+		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
+	}
+	return nil
+}
+
+// FetchNotes fetches notes from a remote for a specific namespace and attempts to update the local notes ref.
+// It uses `git fetch --force <remoteName> <refSpec>:<refSpec>` to overwrite local changes if divergence occurs.
+func FetchNotes(namespace, remoteName string) error {
+	if remoteName == "" {
+		return fmt.Errorf("remoteName cannot be empty")
+	}
+	localRef := formatNamespaceRef(namespace)
+	fullRefSpec := fmt.Sprintf("%s:%s", localRef, localRef) // local_ref:remote_ref, but same name
+
+	_, stderrOutput, err := executeGitCommand("fetch", "--force", remoteName, fullRefSpec)
+	if err != nil {
+		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w", namespace, fullRefSpec, remoteName, stderrOutput, err)
+	}
+	return nil
+}
+
+// PushNotes fetches remote notes for the given namespace, merges them into the local notes
+// using the 'cat_sort_uniq' strategy, and then pushes the combined result to the remote.
+func PushNotes(namespace, remoteName string) error {
+	localRef := formatNamespaceRef(namespace) // e.g., refs/notes/my_namespace
+
+	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
+	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
+	// fmt.Printf("PushNotes: Fetching remote notes for '%s' from '%s'...\n", localRef, remoteName)
+	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, localRef)
+
+	remoteNotesExist := true
+	if fetchErr != nil {
+		// Check if the error is because the remote ref simply doesn't exist.
+		// This is common if notes haven't been pushed to this namespace on the remote yet.
+		// `git fetch` often exits with status 1 or 128 for "ref not found".
+		if strings.Contains(strings.ToLower(fetchStderr), "couldn't find remote ref") ||
+			strings.Contains(strings.ToLower(fetchStderr), "no such ref") ||
+			strings.Contains(strings.ToLower(fetchStderr), "fetch-pack: invalid refspec") ||
+			(strings.Contains(fetchErr.Error(), "exit status 1") && fetchStderr == "") || // Can happen if ref not found
+			strings.Contains(fetchErr.Error(), "exit status 128") {
+			// fmt.Printf("PushNotes: Info: Remote '%s' does not have notes ref '%s'. No remote notes to merge.\n", remoteName, localRef)
+			remoteNotesExist = false
+		} else {
+			// A more significant fetch error occurred.
+			return fmt.Errorf("failed to fetch notes from remote '%s' for ref '%s' before merge: %w; stderr: %s", remoteName, localRef, fetchErr, fetchStderr)
+		}
+	}
+
+	if remoteNotesExist {
+		// 2. Determine the remote-tracking ref name to merge from.
+		// Example: localRef="refs/notes/commits", remoteName="origin" -> remoteTrackingRef = "refs/remotes/origin/notes/commits"
+		var remoteTrackingRef string
+		if strings.HasPrefix(localRef, "refs/notes/") {
+			pathSuffix := strings.TrimPrefix(localRef, "refs/") // e.g., "notes/commits" or "notes/my_ns_suffix"
+			remoteTrackingRef = fmt.Sprintf("refs/remotes/%s/%s", remoteName, pathSuffix)
+		} else {
+			return fmt.Errorf("internal programming error: localRef '%s' is not in the expected 'refs/notes/...' format", localRef)
+		}
+
+		// Verify the remote-tracking ref exists (it should if fetch was successful and remote had notes)
+		_, _, errVerifyRemoteRef := executeGitCommand("rev-parse", "--verify", remoteTrackingRef)
+		if errVerifyRemoteRef != nil {
+			// This might happen if the remote ref truly doesn't exist and fetch indicated so,
+			// or if the remote-tracking ref naming convention is different than expected.
+			// fmt.Printf("PushNotes: Info: Remote tracking ref '%s' not found after fetch. Assuming no remote notes to merge.\n", remoteTrackingRef)
+		} else {
+			// 3. Merge fetched remote notes into local notes using 'cat_sort_uniq' strategy.
+			// fmt.Printf("PushNotes: Merging notes from '%s' into local '%s' using 'cat_sort_uniq' strategy...\n", remoteTrackingRef, localRef)
+			_, mergeStderr, mergeErr := executeGitCommand("notes", "--ref", localRef, "merge", "-s", "cat_sort_uniq", remoteTrackingRef)
+			if mergeErr != nil {
+				// "Already up to date" or "nothing to merge" are not errors in this context.
+				if strings.Contains(strings.ToLower(mergeStderr), "already up to date") || strings.Contains(strings.ToLower(mergeStderr), "nothing to merge") {
+					// fmt.Printf("PushNotes: Info: Local notes '%s' already incorporate or are ahead of '%s'.\n", localRef, remoteTrackingRef)
+				} else if strings.Contains(strings.ToLower(mergeStderr), "conflict") {
+					// Even with 'cat_sort_uniq', fundamental conflicts could theoretically occur, or the merge command failed.
+					return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', possible conflict: %w; stderr: %s", remoteTrackingRef, localRef, mergeErr, mergeStderr)
+				} else {
+					return fmt.Errorf("failed to merge notes from '%s' into '%s': %w; stderr: %s", remoteTrackingRef, localRef, mergeErr, mergeStderr)
+				}
+			} else {
+				// fmt.Printf("PushNotes: Successfully merged remote notes into '%s'.\n", localRef)
+			}
+		}
+	}
+
+	// 4. Push the (now potentially merged) local notes to the remote.
+	// This push should ideally be a fast-forward.
+
+	// fmt.Printf("PushNotes: Pushing local notes ref '%s' to remote '%s'...\n", localRef, remoteName)
+	_, pushStderr, pushErr := executeGitCommand("push", remoteName, localRef)
+	if pushErr != nil {
+		// If this push still fails (e.g., non-fast-forward because someone *else* pushed notes
+		// *between* our fetch and this push), then the situation is a race condition.
+		// The user might need to re-run the operation.
+		return fmt.Errorf("failed to push merged notes ref '%s' to remote '%s': %w; stderr: %s", localRef, remoteName, pushErr, pushStderr)
+	}
+
+	// fmt.Printf("PushNotes: Notes ref '%s' successfully pushed to remote '%s'.\n", localRef, remoteName)
+	return nil
+}
+
+// SetNoteJSON serializes the given value to JSON and stores it as a git note.
+// This function overwrites any existing note for the given commitSha with this single JSON object.
+// Concatenation of multiple JSON objects typically happens during 'git notes merge' (e.g., via PushNotes).
+func SetNoteJSON(namespace, commitSha string, value interface{}) error {
+	if commitSha == "" {
+		return fmt.Errorf("commitSha cannot be empty for SetNoteJSON")
+	}
+	// Serialize the value to JSON
+	jsonData, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("failed to marshal value to JSON for commit %s: %w", commitSha, err)
+	}
+
+	// Call the original SetNote with the JSON string
+	return SetNote(namespace, commitSha, string(jsonData))
+}
+
+// GetNoteJSON retrieves a git note, which may contain one or more concatenated JSON objects.
+// It deserializes each JSON object from the note content into elements of the slice
+// pointed to by slicePtr.
+func GetNoteJSON(namespace, commitSha string, slicePtr interface{}) error {
+	if commitSha == "" {
+		return fmt.Errorf("commitSha cannot be empty for GetNoteJSON")
+	}
+
+	rv := reflect.ValueOf(slicePtr)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return fmt.Errorf("slicePtr must be a non-nil pointer to a slice, got %T", slicePtr)
+	}
+	sliceVal := rv.Elem()
+	if sliceVal.Kind() != reflect.Slice {
+		return fmt.Errorf("slicePtr must point to a slice, got pointer to %s", sliceVal.Kind())
+	}
+	sliceElemType := sliceVal.Type().Elem()
+	isPtrElem := sliceElemType.Kind() == reflect.Ptr
+	actualElemTypeForStructCheck := sliceElemType
+	if isPtrElem {
+		actualElemTypeForStructCheck = sliceElemType.Elem()
+	}
+	if actualElemTypeForStructCheck.Kind() != reflect.Struct {
+		return fmt.Errorf("slice element type must be a struct or a pointer to a struct, got %s (or pointer to %s)",
+			sliceElemType.Kind(), actualElemTypeForStructCheck.Kind())
+	}
+
+	noteContent, err := GetNote(namespace, commitSha)
+	if err != nil {
+		if strings.Contains(err.Error(), "failed to get note") || strings.Contains(err.Error(), "exit status 1") {
+			sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), 0, 0))
+			return nil
+		}
+		return fmt.Errorf("failed to get underlying note for commit %s: %w", commitSha, err)
+	}
+
+	if strings.TrimSpace(noteContent) == "" {
+		sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), 0, 0))
+		return nil
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(noteContent))
+	results := reflect.MakeSlice(sliceVal.Type(), 0, 0)
+
+	for decoder.More() {
+		var currentElemInstance reflect.Value
+		var decodeTarget interface{}
+
+		if isPtrElem {
+			newPtr := reflect.New(sliceElemType.Elem())
+			decodeTarget = newPtr.Interface()
+			currentElemInstance = newPtr
+		} else {
+			newValPtr := reflect.New(sliceElemType)
+			decodeTarget = newValPtr.Interface()
+			currentElemInstance = newValPtr.Elem()
+		}
+
+		if errDecode := decoder.Decode(decodeTarget); errDecode != nil {
+			sliceVal.Set(results) // Guardar lo que se haya procesado con éxito
+			// Extraer un pequeño fragmento del contenido cerca del error para el mensaje
+			offset := int(decoder.InputOffset())
+			start := offset - 20
+			if start < 0 {
+				start = 0
+			}
+			end := offset + 20
+			if end > len(noteContent) {
+				end = len(noteContent)
+			}
+			contextSnippet := noteContent[start:end]
+			if offset > 0 && offset <= len(noteContent) && (noteContent[offset-1] == '{' || noteContent[offset-1] == '[') {
+				// If error is at the very start of an object/array, decoder.InputOffset might be just after the opening brace.
+				// The context snippet might be more helpful if it includes the brace.
+			}
+
+			return fmt.Errorf("failed to decode JSON object in stream for commit %s (processed %d objects): %w. Context around error: \"...%s...\"",
+				commitSha, results.Len(), errDecode, contextSnippet)
+		}
+		results = reflect.Append(results, currentElemInstance)
+	}
+
+	// Si decoder.More() es false, el stream de objetos JSON válidos ha terminado.
+	// Cualquier dato residual que no fuera un JSON válido habría causado un error en decoder.Decode() dentro del bucle.
+	sliceVal.Set(results)
+	return nil
+}

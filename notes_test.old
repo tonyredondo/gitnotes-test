@@ -1,0 +1,593 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json" // Required for one of the new tests, or comparing structs
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect" // Required for reflect.DeepEqual
+	"strings"
+	"testing"
+	"time"
+)
+
+// Helper function to execute a command in a specific directory
+func runCmd(t *testing.T, dir string, command string, args ...string) (string, string) {
+	t.Helper()
+	cmd := exec.Command(command, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		// Log stderr for easier debugging of git commands
+		t.Logf("Command `git %s` in dir `%s` failed. Stderr: %s\nStdout: %s", strings.Join(args, " "), dir, stderr.String(), stdout.String())
+		t.Fatalf("Command %s %v failed in dir %s: %v", command, args, dir, err)
+	}
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+}
+
+// Helper function to setup a temporary git repository.
+// It initializes git, sets user.name and user.email, and creates an initial commit.
+// Returns the path to the repo and a cleanup function.
+func setupTestRepo(t *testing.T) (repoPath string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "testrepo-gitnotes-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	runCmd(t, dir, "git", "init", "-b", "main")
+	runCmd(t, dir, "git", "config", "user.email", "test@example.com")
+	runCmd(t, dir, "git", "config", "user.name", "Test User")
+	// Create an initial empty commit so HEAD exists, which some git operations might need
+	runCmd(t, dir, "git", "commit", "--allow-empty", "-m", "Initial empty commit")
+
+	return dir
+}
+
+// Helper function to create a commit in the given repo path.
+// Returns the SHA of the created commit.
+func createTestCommit(t *testing.T, repoPath string, filename string, content string, message string) string {
+	t.Helper()
+	filePath := filepath.Join(repoPath, filename)
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write file %s: %v", filePath, err)
+	}
+	runCmd(t, repoPath, "git", "add", filename)
+	runCmd(t, repoPath, "git", "commit", "-m", message)
+	sha, _ := runCmd(t, repoPath, "git", "rev-parse", "HEAD")
+	return sha
+}
+
+// TestMain checks for git availability before running tests.
+func TestMain(m *testing.M) {
+	if _, err := exec.LookPath("git"); err != nil {
+		fmt.Println("WARNING: 'git' command not found in PATH, skipping git-dependent tests.")
+		// os.Exit(0) // Skips all tests in this package if git not found
+		// For CI, it might be better to fail if git is expected.
+		// For local dev, skipping is fine. Let's allow tests to run and fail if git is missing
+		// and a test actually needs it. Many modern test runners will report this well.
+	}
+	os.Exit(m.Run())
+}
+
+func TestGitNoteOperations(t *testing.T) {
+	repoPath := setupTestRepo(t)
+	commitSha1 := createTestCommit(t, repoPath, "file1.txt", "content1", "Initial commit for string notes")
+	commitSha2 := createTestCommit(t, repoPath, "file2.txt", "content2", "Second commit for string notes")
+
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("Failed to change CWD to repoPath %s: %v", repoPath, err)
+	}
+	defer func() {
+		if err := os.Chdir(originalCwd); err != nil {
+			t.Logf("Failed to restore CWD to %s: %v", originalCwd, err)
+		}
+	}()
+
+	namespace := "test-string-namespace"
+	note1Content := "This is a note for commit 1 - " + time.Now().Format(time.RFC3339Nano)
+	note2Content := "This is an updated note for commit 1 - " + time.Now().Format(time.RFC3339Nano)
+	note3Content := "This is a note for commit 2 - " + time.Now().Format(time.RFC3339Nano)
+
+	t.Run("SetAndGetNote_String", func(t *testing.T) {
+		err := SetNote(namespace, commitSha1, note1Content)
+		if err != nil {
+			t.Fatalf("SetNote failed: %v", err)
+		}
+
+		retrieved, err := GetNote(namespace, commitSha1)
+		if err != nil {
+			t.Fatalf("GetNote failed: %v", err)
+		}
+		if retrieved != note1Content {
+			t.Errorf("GetNote: expected '%s', got '%s'", note1Content, retrieved)
+		}
+
+		_, err = GetNote(namespace, "nonexistentsha")
+		if err == nil {
+			t.Error("GetNote: expected error for non-existent SHA, got nil")
+		}
+		_, err = GetNote(namespace, commitSha2) // Note not set yet for commitSha2
+		if err == nil {
+			t.Error("GetNote: expected error for unset note for commitSha2, got nil")
+		} else {
+			// Check that we get an error because the note doesn't exist.
+			// `git notes show SHA` exits with 1 if no note for SHA.
+			// Our wrapper should reflect this.
+			if !strings.Contains(err.Error(), "failed to get note") {
+				t.Errorf("GetNote: expected 'failed to get note' error for unset note, got: %v", err)
+			}
+		}
+	})
+
+	t.Run("OverwriteNote_String", func(t *testing.T) {
+		err := SetNote(namespace, commitSha1, note1Content)
+		if err != nil {
+			t.Fatalf("SetNote (initial) failed: %v", err)
+		}
+		err = SetNote(namespace, commitSha1, note2Content)
+		if err != nil {
+			t.Fatalf("SetNote (overwrite) failed: %v", err)
+		}
+
+		retrieved, err := GetNote(namespace, commitSha1)
+		if err != nil {
+			t.Fatalf("GetNote after overwrite failed: %v", err)
+		}
+		if retrieved != note2Content {
+			t.Errorf("GetNote after overwrite: expected '%s', got '%s'", note2Content, retrieved)
+		}
+	})
+
+	t.Run("GetNoteList_String", func(t *testing.T) {
+		if err := SetNote(namespace, commitSha1, note2Content); err != nil {
+			t.Fatalf("Setup SetNote for commitSha1 failed: %v", err)
+		}
+		if err := SetNote(namespace, commitSha2, note3Content); err != nil {
+			t.Fatalf("Setup SetNote for commitSha2 failed: %v", err)
+		}
+
+		notes, err := GetNoteList(namespace)
+		if err != nil {
+			t.Fatalf("GetNoteList failed: %v", err)
+		}
+
+		if len(notes) != 2 {
+			// Order isn't guaranteed by git notes list, so we check for presence
+			t.Fatalf("GetNoteList: expected 2 notes, got %d. Notes: %v", len(notes), notes)
+		}
+
+		foundNote2 := false
+		foundNote3 := false
+		for _, note := range notes {
+			if note == note2Content {
+				foundNote2 = true
+			}
+			if note == note3Content {
+				foundNote3 = true
+			}
+		}
+		if !foundNote2 || !foundNote3 {
+			t.Errorf("GetNoteList did not find all expected notes. Found note2Content: %t, note3Content: %t. List: %v", foundNote2, foundNote3, notes)
+		}
+
+		emptyNotes, err := GetNoteList("empty-string-test-namespace")
+		if err != nil {
+			t.Fatalf("GetNoteList for empty namespace failed: %v", err)
+		}
+		if len(emptyNotes) != 0 {
+			t.Errorf("GetNoteList for empty namespace: expected 0 notes, got %d", len(emptyNotes))
+		}
+	})
+
+	t.Run("DeleteNote_String", func(t *testing.T) {
+		if err := SetNote(namespace, commitSha1, note2Content); err != nil {
+			t.Fatalf("Setup SetNote for DeleteNote failed: %v", err)
+		}
+
+		err := DeleteNote(namespace, commitSha1)
+		if err != nil {
+			t.Fatalf("DeleteNote failed: %v", err)
+		}
+
+		_, err = GetNote(namespace, commitSha1)
+		if err == nil {
+			t.Error("GetNote after DeleteNote: expected error (note not found), got nil")
+		}
+
+		// Try deleting a non-existent note (already deleted)
+		// `git notes remove` for a non-existent note usually exits with 0 if the ref exists but the commit has no note.
+		// If the *ref itself* doesn't exist, it might error differently. Let's check our wrapper's behavior.
+		// The current DeleteNote wrapper propagates the error from `git notes remove`.
+		// `git notes remove <sha>` when <sha> has no note (but notes ref exists) exits 0.
+		// `git notes --ref <nonexistent_ref> remove <sha>` exits 1.
+		err = DeleteNote(namespace, commitSha1) // Note already deleted for this SHA under this namespace
+		if err != nil {
+			// This behavior depends on the strictness of `git notes remove`.
+			// If it errors because the specific note object for the commit is gone, this test is fine.
+			// If `git notes remove` is idempotent for a non-existing note on a commit, err might be nil.
+			// `git notes remove` seems to be idempotent if the notes ref exists but the specific commit has no note.
+			// Let's assume for now the underlying `git notes remove` is okay with removing an already removed/non-existent note for a SHA.
+			// Update: `git notes remove <SHA>` when there is no note for <SHA> (but notes ref exists) is a no-op and exits 0.
+			// So, err should be nil here.
+			// t.Errorf("DeleteNote: expected no error for already deleted note, but got: %v", err)
+		}
+
+		// Try deleting a note for a non-existent SHA
+		err = DeleteNote(namespace, "nonexistentsha")
+		if err == nil {
+			t.Error("DeleteNote: expected error for non-existent SHA, got nil")
+		} else if !strings.Contains(err.Error(), "nonexistentsha") {
+			// git will complain about the object name typically.
+			t.Errorf("DeleteNote: error for non-existent SHA should mention the SHA: %v", err)
+		}
+	})
+}
+
+// --- Tests for JSON Note Operations ---
+
+type MyCustomData struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Count     int       `json:"count"`
+	IsEnabled bool      `json:"is_enabled"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func TestGitNoteJSONOperations(t *testing.T) {
+	repoPath := setupTestRepo(t)
+	commitShaJSON1 := createTestCommit(t, repoPath, "file_json1.txt", "json content 1", "Commit for JSON note 1")
+	commitShaJSON2 := createTestCommit(t, repoPath, "file_json2.txt", "json content 2", "Commit for JSON note 2")
+
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("Failed to change CWD to repoPath %s: %v", repoPath, err)
+	}
+	defer func() {
+		if err := os.Chdir(originalCwd); err != nil {
+			t.Logf("Failed to restore CWD to %s: %v", originalCwd, err)
+		}
+	}()
+
+	jsonNamespace := "test-json-multi-namespace"
+	fixedTime, _ := time.Parse(time.RFC3339, "2023-10-26T10:00:00Z")
+
+	data1 := MyCustomData{ID: "obj1", Name: "Object One", Count: 1, IsEnabled: true, Timestamp: fixedTime}
+	data2 := MyCustomData{ID: "obj2", Name: "Object Two", Count: 2, IsEnabled: false, Timestamp: fixedTime.Add(1 * time.Hour)}
+	data3 := MyCustomData{ID: "obj3", Name: "Object Three", Count: 3, IsEnabled: true, Timestamp: fixedTime.Add(2 * time.Hour)}
+
+	t.Run("SetNoteJSON_SingleObject_And_GetNoteJSON_RetrievesSliceOfOne", func(t *testing.T) {
+		err := SetNoteJSON(jsonNamespace, commitShaJSON1, data1)
+		if err != nil {
+			t.Fatalf("SetNoteJSON failed: %v", err)
+		}
+
+		var retrievedDataSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &retrievedDataSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON failed: %v", err)
+		}
+
+		if len(retrievedDataSlice) != 1 {
+			t.Fatalf("GetNoteJSON: expected slice of 1 element, got %d", len(retrievedDataSlice))
+		}
+		if !reflect.DeepEqual(data1, retrievedDataSlice[0]) {
+			t.Errorf("GetNoteJSON: data mismatch.\nExpected single element: %+v\nGot in slice: %+v", data1, retrievedDataSlice[0])
+		}
+	})
+
+	t.Run("SetNoteJSON_Overwrite_And_GetNoteJSON_RetrievesNewSliceOfOne", func(t *testing.T) {
+		// Set initial object
+		err := SetNoteJSON(jsonNamespace, commitShaJSON1, data1)
+		if err != nil {
+			t.Fatalf("SetNoteJSON (initial) failed: %v", err)
+		}
+		// Overwrite with data2
+		err = SetNoteJSON(jsonNamespace, commitShaJSON1, data2)
+		if err != nil {
+			t.Fatalf("SetNoteJSON (overwrite) failed: %v", err)
+		}
+
+		var retrievedDataSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &retrievedDataSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON after overwrite failed: %v", err)
+		}
+		if len(retrievedDataSlice) != 1 {
+			t.Fatalf("GetNoteJSON after overwrite: expected slice of 1 element, got %d", len(retrievedDataSlice))
+		}
+		if !reflect.DeepEqual(data2, retrievedDataSlice[0]) {
+			t.Errorf("GetNoteJSON after overwrite: data mismatch. Expected %+v, got %+v", data2, retrievedDataSlice[0])
+		}
+	})
+
+	t.Run("GetNoteJSON_ConcatenatedJSONs", func(t *testing.T) {
+		json1, _ := json.Marshal(data1)
+		json2, _ := json.Marshal(data2)
+		json3, _ := json.Marshal(data3)
+		concatenatedJSONs := string(json1) + string(json2) + string(json3)
+
+		err := SetNote(jsonNamespace, commitShaJSON2, concatenatedJSONs) // Manually set the concatenated string
+		if err != nil {
+			t.Fatalf("Failed to set concatenated JSON note: %v", err)
+		}
+
+		var retrievedSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON2, &retrievedSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON for concatenated JSONs failed: %v", err)
+		}
+
+		expectedSlice := []MyCustomData{data1, data2, data3}
+		if len(retrievedSlice) != len(expectedSlice) {
+			t.Fatalf("GetNoteJSON (concatenated): expected slice of %d elements, got %d. Content: %v", len(expectedSlice), len(retrievedSlice), retrievedSlice)
+		}
+		if !reflect.DeepEqual(expectedSlice, retrievedSlice) {
+			t.Errorf("GetNoteJSON (concatenated): data mismatch.\nExpected slice: %+v\nGot slice: %+v", expectedSlice, retrievedSlice)
+		}
+	})
+
+	t.Run("GetNoteJSON_ConcatenatedJSONs_WithPointerSlice", func(t *testing.T) {
+		json1, _ := json.Marshal(data1)
+		json2, _ := json.Marshal(data2)
+		concatenatedJSONs := string(json1) + string(json2)
+
+		err := SetNote(jsonNamespace, commitShaJSON2, concatenatedJSONs)
+		if err != nil {
+			t.Fatalf("Failed to set concatenated JSON note for pointer slice test: %v", err)
+		}
+
+		var retrievedPtrSlice []*MyCustomData // Slice of POINTERS
+		err = GetNoteJSON(jsonNamespace, commitShaJSON2, &retrievedPtrSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON for concatenated JSONs into pointer slice failed: %v", err)
+		}
+
+		expectedData := []*MyCustomData{&data1, &data2} // Pointers to the original data for comparison
+		if len(retrievedPtrSlice) != len(expectedData) {
+			t.Fatalf("GetNoteJSON (concatenated to ptr slice): expected %d elements, got %d.", len(expectedData), len(retrievedPtrSlice))
+		}
+		for i := range expectedData {
+			if !reflect.DeepEqual(expectedData[i], retrievedPtrSlice[i]) {
+				t.Errorf("GetNoteJSON (concatenated to ptr slice): element %d mismatch.\nExpected: %+v\nGot: %+v", i, expectedData[i], retrievedPtrSlice[i])
+			}
+		}
+	})
+
+	t.Run("GetNoteJSON_NonExistentNote_ReturnsEmptySlice", func(t *testing.T) {
+		var retrievedSlice []MyCustomData
+		// Using a commit SHA for which no note has been set in this namespace
+		err := GetNoteJSON(jsonNamespace, "nonexistentcommitshaforjson", &retrievedSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON for non-existent note failed: %v", err)
+		}
+		if retrievedSlice == nil { // Should be an empty slice, not nil, after successful call.
+			// reflect.MakeSlice(sliceVal.Type(), 0, 0) makes it non-nil empty.
+			// If it remains nil, it means sliceVal.Set was not called.
+			t.Errorf("GetNoteJSON for non-existent note: expected non-nil empty slice, got nil")
+		} else if len(retrievedSlice) != 0 {
+			t.Errorf("GetNoteJSON for non-existent note: expected empty slice, got %d elements", len(retrievedSlice))
+		}
+	})
+
+	t.Run("GetNoteJSON_EmptyNoteContent_ReturnsEmptySlice", func(t *testing.T) {
+		err := SetNote(jsonNamespace, commitShaJSON1, "") // Set an empty note
+		if err != nil {
+			t.Fatalf("Failed to set empty note: %v", err)
+		}
+		var retrievedSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &retrievedSlice)
+		if err != nil {
+			t.Fatalf("GetNoteJSON for empty note content failed: %v", err)
+		}
+		if retrievedSlice == nil {
+			t.Errorf("GetNoteJSON for empty note: expected non-nil empty slice, got nil")
+		} else if len(retrievedSlice) != 0 {
+			t.Errorf("GetNoteJSON for empty note content: expected empty slice, got %d elements", len(retrievedSlice))
+		}
+	})
+
+	t.Run("GetNoteJSON_MalformedJSONStream", func(t *testing.T) {
+		json1, _ := json.Marshal(data1)
+		malformedContent := string(json1) + `{"id":"obj2","name":"unterminated string` // Missing closing brace and quote
+
+		err := SetNote(jsonNamespace, commitShaJSON2, malformedContent)
+		if err != nil {
+			t.Fatalf("Failed to set malformed JSON note: %v", err)
+		}
+
+		var retrievedSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON2, &retrievedSlice)
+		if err == nil {
+			t.Fatal("GetNoteJSON expected error for malformed JSON stream, but got nil")
+		}
+		if !strings.Contains(err.Error(), "failed to decode JSON object") {
+			t.Errorf("GetNoteJSON error message for malformed stream is not as expected: %v", err)
+		}
+		// The slice might contain successfully decoded objects before the error.
+		// This behavior is acceptable. Check if data1 was decoded.
+		if len(retrievedSlice) != 1 || !reflect.DeepEqual(data1, retrievedSlice[0]) {
+			t.Errorf("GetNoteJSON with malformed stream: expected 1 successfully decoded object, got %d. Slice content: %+v", len(retrievedSlice), retrievedSlice)
+		}
+	})
+
+	t.Run("GetNoteJSON_TrailingGarbageData", func(t *testing.T) {
+		json1, _ := json.Marshal(data1)
+		// Quitamos los espacios iniciales antes de "trailing garbage" para asegurar que el decodificador lo ve inmediatamente después de json1
+		contentWithTrailingGarbage := string(json1) + "trailing garbage"
+
+		err := SetNote(jsonNamespace, commitShaJSON1, contentWithTrailingGarbage)
+		if err != nil {
+			t.Fatalf("SetNote failed for content with trailing garbage: %v", err)
+		}
+
+		var retrievedSlice []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &retrievedSlice)
+		if err == nil {
+			t.Fatal("GetNoteJSON: expected an error due to trailing garbage data, but got nil")
+		}
+
+		// El error debe indicar que falló al decodificar un objeto en el stream, después de procesar 1 objeto.
+		// Y el error subyacente debería ser sobre el carácter 'a' en "trailing".
+		if !strings.Contains(err.Error(), "failed to decode JSON object in stream") ||
+			!strings.Contains(err.Error(), "(processed 1 objects)") ||
+			!strings.Contains(err.Error(), "invalid character 'a'") { // Comprobación más específica del error de parseo
+			t.Errorf("GetNoteJSON: error message for trailing garbage is not as expected: %v", err)
+		}
+
+		// Comprobar que el JSON válido SÍ se procesó
+		if len(retrievedSlice) != 1 || !reflect.DeepEqual(retrievedSlice[0], data1) {
+			t.Errorf("GetNoteJSON: expected one valid object to be decoded before trailing garbage error. Got slice: %+v, expected item: %+v", retrievedSlice, data1)
+		}
+	})
+
+	t.Run("GetNoteJSON_InvalidSlicePtrType", func(t *testing.T) {
+		// Test with nil
+		err := GetNoteJSON(jsonNamespace, commitShaJSON1, nil)
+		if err == nil || !strings.Contains(err.Error(), "non-nil pointer to a slice") {
+			t.Errorf("GetNoteJSON with nil slicePtr: expected specific error, got %v", err)
+		}
+
+		// Test with non-pointer
+		var s []MyCustomData
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, s)
+		if err == nil || !strings.Contains(err.Error(), "non-nil pointer to a slice") {
+			t.Errorf("GetNoteJSON with non-pointer slice: expected specific error, got %v", err)
+		}
+
+		// Test with pointer to non-slice
+		var i int
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &i)
+		if err == nil || !strings.Contains(err.Error(), "point to a slice") {
+			t.Errorf("GetNoteJSON with pointer to non-slice: expected specific error, got %v", err)
+		}
+
+		// Test with pointer to slice of non-structs (e.g. *[]int)
+		var intSlice []int
+		err = GetNoteJSON(jsonNamespace, commitShaJSON1, &intSlice)
+		if err == nil || !strings.Contains(err.Error(), "element type must be a struct") {
+			t.Errorf("GetNoteJSON with pointer to slice of ints: expected specific error, got %v", err)
+		}
+
+	})
+
+	// Clean up
+	t.Cleanup(func() {
+		_ = DeleteNote(jsonNamespace, commitShaJSON1)
+		_ = DeleteNote(jsonNamespace, commitShaJSON2)
+	})
+}
+
+// TestGitNoteRemoteOperations remains largely the same, as it tests the underlying
+// string-based note transport. If JSON notes are used with remote operations,
+// they are just strings at the transport layer.
+func TestGitNoteRemoteOperations(t *testing.T) {
+	// Setup "local" repository
+	localRepoPath := setupTestRepo(t)
+	localCommitSha := createTestCommit(t, localRepoPath, "localfile.txt", "local content", "Commit for remote ops")
+
+	// Setup "remote" bare repository
+	remoteRepoDir, err := os.MkdirTemp("", "testrepo-remote-bare-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for remote bare repo: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(remoteRepoDir) })
+	runCmd(t, remoteRepoDir, "git", "init", "--bare")
+
+	// Configure local repo to have a remote pointing to the bare repo
+	runCmd(t, localRepoPath, "git", "remote", "add", "testorigin", remoteRepoDir)
+
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get CWD: %v", err)
+	}
+	if err := os.Chdir(localRepoPath); err != nil {
+		t.Fatalf("Failed to change CWD to %s: %v", localRepoPath, err)
+	}
+	defer func() {
+		if err := os.Chdir(originalCwd); err != nil {
+			t.Logf("Failed to restore CWD to %s: %v", originalCwd, err)
+		}
+	}()
+
+	namespace := "remote-ops-namespace"
+	noteContent := "Note for remote testing - " + time.Now().Format(time.RFC3339Nano) // Plain string for this test
+
+	t.Run("PushAndFetchNotes_String", func(t *testing.T) {
+		if err := SetNote(namespace, localCommitSha, noteContent); err != nil {
+			t.Fatalf("SetNote locally failed: %v", err)
+		}
+
+		if err := PushNotes(namespace, "testorigin"); err != nil {
+			t.Fatalf("PushNotes failed: %v", err)
+		}
+
+		expectedRemoteRefPath := filepath.Join(remoteRepoDir, formatNamespaceRef(namespace))
+		if _, err := os.Stat(expectedRemoteRefPath); os.IsNotExist(err) {
+			stdout, _ := runCmd(t, "", "git", "-C", remoteRepoDir, "show", formatNamespaceRef(namespace)) // Check directly in bare repo
+			// A simpler check for bare repo is to see if the ref exists
+			stdoutLsRemote, _ := runCmd(t, localRepoPath, "git", "ls-remote", "testorigin", formatNamespaceRef(namespace))
+			if !strings.Contains(stdoutLsRemote, formatNamespaceRef(namespace)) {
+				t.Logf("git show output from bare repo for %s:\n%s", formatNamespaceRef(namespace), stdout)
+				t.Errorf("Note ref '%s' not found in remote 'testorigin' after PushNotes. ls-remote output: %s", formatNamespaceRef(namespace), stdoutLsRemote)
+			}
+		}
+
+		if err := DeleteNote(namespace, localCommitSha); err != nil {
+			t.Fatalf("DeleteNote locally failed: %v", err)
+		}
+		_, err = GetNote(namespace, localCommitSha)
+		if err == nil {
+			t.Fatal("Note still exists locally after delete, before FetchNotes test.")
+		}
+
+		if err := FetchNotes(namespace, "testorigin"); err != nil {
+			t.Fatalf("FetchNotes failed: %v", err)
+		}
+
+		fetchedNote, err := GetNote(namespace, localCommitSha)
+		if err != nil {
+			t.Fatalf("GetNote after FetchNotes failed: %v", err)
+		}
+		if fetchedNote != noteContent {
+			t.Errorf("Fetched note content mismatch: expected '%s', got '%s'", noteContent, fetchedNote)
+		}
+	})
+
+	t.Run("PushToNonExistentRemote_String", func(t *testing.T) {
+		if err := SetNote(namespace, localCommitSha, "some note for non-existent remote"); err != nil {
+			t.Fatalf("SetNote locally failed: %v", err)
+		}
+		err := PushNotes(namespace, "nonexistentremote")
+		if err == nil {
+			t.Error("PushNotes to non-existent remote should have failed, but did not")
+		}
+	})
+
+	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
+		err := FetchNotes(namespace, "nonexistentremote")
+		if err == nil {
+			// This might not be an error if the remote doesn't exist, depending on git fetch's behavior
+			// and our wrapper's interpretation. Current FetchNotes might return nil if ref just not found.
+			// Let's verify based on current FetchNotes.
+			// If remote "nonexistentremote" truly doesn't exist, `git fetch` will error.
+			t.Error("FetchNotes from non-existent remote should have failed, but did not")
+		}
+	})
+}
