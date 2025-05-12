@@ -20,9 +20,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - run: |
-        git config --local user.name "Datadog Actions"
-        git config --local user.email "generated@datadoghq.com"
 
     - name: Set up Go
       uses: actions/setup-go@v4

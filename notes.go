@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -33,6 +34,13 @@ func executeGitCommand(args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.Env = append(
+		os.Environ(),
+		"GIT_AUTHOR_NAME=Library Notes",
+		"GIT_AUTHOR_EMAIL=lib@example.com",
+		"GIT_COMMITTER_NAME=Library Notes",
+		"GIT_COMMITTER_EMAIL=lib@example.com",
+	)
 
 	err := cmd.Run()
 
