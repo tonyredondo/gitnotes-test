@@ -26,18 +26,32 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Compute GOMODCACHE
-      id: paths
-      run: echo "gomod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+    - name: Get Go cache directories
+      id: go-cache-paths # ID para este paso
+      run: |
+        echo "GOMODCACHE_PATH=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
+        echo "GOCACHE_PATH=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+        # Líneas de depuración para ver las rutas en el log:
+        echo "GOMODCACHE reported by 'go env': $(go env GOMODCACHE)"
+        echo "GOCACHE reported by 'go env': $(go env GOCACHE)"
 
-    - name: Cache Go modules
-      id: gomod
+    # Paso de depuración para verificar los outputs ANTES de usarlos en actions/cache
+    - name: Debug Go Cache Paths Output
+      run: |
+        echo "GOMODCACHE_PATH from step output: ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}"
+        echo "GOCACHE_PATH from step output: ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}"
+
+    - name: Cache Go modules and build cache
       uses: actions/cache@v4
+      id: go-cache
       with:
-        path: ${{ steps.paths.outputs.gomod }}
-        key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+        path: |
+          ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
+          ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
+        key: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-mod-
+          ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-
+          ${{ runner.os }}-go-
 
     - name: Run
       run: go run ./...
