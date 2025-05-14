@@ -59,3 +59,4 @@ jobs:
           ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
           ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
         key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
+
