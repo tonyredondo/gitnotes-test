@@ -33,9 +33,9 @@ jobs:
         echo "GOCACHE_PATH=$(go env GOCACHE)" >> $GITHUB_OUTPUT
         echo "GOVERSION=$(go env GOVERSION)" >> $GITHUB_OUTPUT
 
-    - name: Cache Go modules and build cache
-      uses: actions/cache@v4
-      id: go-cache
+    - name: Cache Go restore
+      uses: actions/cache/restore@v4
+      id: go-cache-restore
       with:
         path: |
           ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
@@ -47,6 +47,14 @@ jobs:
       with:
         languages: go
         api_key: ${{secrets.DD_API_KEY}}
+
+    - name: Cache Go save
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
+          ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
+        key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
 
     - name: Run
       run: go run ./...
