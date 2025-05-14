@@ -42,6 +42,12 @@ jobs:
           ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
         key: ${{ runner.os }}-go-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
 
+    - name: Configure Datadog Test Optimization
+      uses: datadog/test-visibility-github-action@v2
+      with:
+        languages: go
+        api_key: ${{secrets.DD_API_KEY}}
+
     - name: Run
       run: go run ./...
 
