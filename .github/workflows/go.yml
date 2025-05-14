@@ -40,7 +40,7 @@ jobs:
         path: |
           ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
           ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
-        key: ${{ runner.os }}-go-test-optimization-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-test-optimization-v2-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
 
     - name: Configure Datadog Test Optimization
       uses: datadog/test-visibility-github-action@v2
@@ -48,13 +48,14 @@ jobs:
         languages: go
         api_key: ${{secrets.DD_API_KEY}}
 
+    - name: Run
+      run: go run ./...
+
     - name: Cache Go save
       uses: actions/cache/save@v4
+      if: steps.go-cache-restore.outputs.cache-hit != 'true'
       with:
         path: |
           ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
           ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
         key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
-
-    - name: Run
-      run: go run ./...
