@@ -40,7 +40,7 @@ jobs:
         path: |
           ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
           ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
-        key: ${{ runner.os }}-go-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-test-optimization-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
 
     - name: Configure Datadog Test Optimization
       uses: datadog/test-visibility-github-action@v2
