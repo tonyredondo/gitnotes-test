@@ -203,29 +203,53 @@ func FetchNotes(namespace, remoteName string) error {
 		return fmt.Errorf("remoteName cannot be empty")
 	}
 	localRef := formatNamespaceRef(namespace)
-	fullRefSpec := fmt.Sprintf("%s:%s", localRef, localRef) // local_ref:remote_ref, but same name
+	// The refspec fetches the remote notes ref and updates the local one with the same name.
+	// e.g., refs/notes/mynamespace:refs/notes/mynamespace
+	fullRefSpec := fmt.Sprintf("%s:%s", localRef, localRef)
 
+	// 1. Fetch the notes reference itself. This is critical.
 	_, stderrOutput, err := executeGitCommand("fetch", "--force", remoteName, fullRefSpec)
 	if err != nil {
 		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w", namespace, fullRefSpec, remoteName, stderrOutput, err)
 	}
 
-	// After fetching notes, ensure all referenced commits exist locally
-	listOutput, _, err := executeGitCommand("notes", "--ref", localRef, "list")
-	if err == nil && listOutput != "" {
+	// 2. After fetching notes, list all commits referenced by these notes.
+	// The original code proceeds even if listing notes fails or returns empty,
+	// so we'll maintain that behavior for this part.
+	listOutput, _, listErr := executeGitCommand("notes", "--ref", localRef, "list")
+
+	// Only proceed if listing notes was successful and produced output.
+	if listErr == nil && listOutput != "" {
 		scanner := bufio.NewScanner(strings.NewReader(listOutput))
+		// Using a map to store commitShas ensures uniqueness efficiently.
+		commitShasToFetch := make(map[string]struct{})
+
 		for scanner.Scan() {
 			parts := strings.Fields(scanner.Text())
+			// Output of `git notes list` is typically "<note-object-sha> <commit-sha>"
 			if len(parts) >= 2 {
 				commitSha := parts[1]
-				_, _, tsErr := executeGitCommand("show", "-s", "--format=%ct", commitSha)
-				if tsErr != nil && strings.Contains(tsErr.Error(), "bad object") {
-					// Try to fetch the missing commit from remote
-					_, _, _ = executeGitCommand("fetch", remoteName, commitSha)
-				}
+				commitShasToFetch[commitSha] = struct{}{}
 			}
 		}
+
+		// 3. If there are any commit SHAs referenced by the notes, fetch them all in a single command.
+		if len(commitShasToFetch) > 0 {
+			// Convert map keys to a slice of SHAs for the command arguments.
+			shas := make([]string, 0, len(commitShasToFetch))
+			for sha := range commitShasToFetch {
+				shas = append(shas, sha)
+			}
+
+			// Prepare arguments for `git fetch <remoteName> <sha1> <sha2> ...`
+			fetchArgs := []string{"fetch", remoteName}
+			fetchArgs = append(fetchArgs, shas...)
+			_, _, _ = executeGitCommand(fetchArgs...)
+		}
 	}
+	// If listErr was not nil or listOutput was empty, the block above is skipped.
+	// The function returns nil, indicating success for the primary operation of fetching the notes ref,
+	// consistent with the original function's behavior.
 	return nil
 }
 
