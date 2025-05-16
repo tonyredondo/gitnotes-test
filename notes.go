@@ -63,6 +63,10 @@ func GetNote(namespace, commitSha string) (string, error) {
 		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
 	}
 	if err != nil {
+		if strings.Contains(err.Error(), "no note found for object") ||
+			strings.Contains(err.Error(), "failed to get note") {
+			return "", nil // Not an error, just no note
+		}
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
 	}
 	return stdout, nil
