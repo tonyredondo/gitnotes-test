@@ -27,26 +27,6 @@ jobs:
         go-version: '1.24'
         cache: 'false'
 
-#    - name: Get Go cache directories
-#      id: go-cache-paths # ID para este paso
-#      run: |
-#        echo "TAR_OPTIONS=--skip-old-files" >> $GITHUB_ENV
-#        echo "GOMODCACHE_PATH=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
-#        echo "GOCACHE_PATH=$(go env GOCACHE)" >> $GITHUB_OUTPUT
-#        echo "GOVERSION=$(go env GOVERSION)" >> $GITHUB_OUTPUT
-#        echo "GOPATH=$(go env GOPATH)" >> $GITHUB_OUTPUT
-
-#    - name: Cache Go restore
-#      uses: actions/cache/restore@v4
-#      id: go-cache-restore
-#      with:
-#        path: |
-#          ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
-#          ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
-#          ${{ env.GITHUB_WORKSPACE }}/.datadog
-#          ${{ steps.go-cache-paths.outputs.GOPATH }}/bin/orchestrion
-#        key: ${{ runner.os }}-go-test-optimization-v3-${{ steps.go-cache-paths.outputs.GOVERSION }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
-
     - name: Configure Datadog Test Optimization
       uses: datadog/test-visibility-github-action@4352c13a56a4d0c8dc3c78463dda969e86178c99
       with:
@@ -55,18 +35,4 @@ jobs:
 
     - name: Run
       run: |
-        du $(go env GOMODCACHE) -h -s
         go run ./...
-
-#    - name: Cache Go save
-#      uses: actions/cache/save@v4
-#      if: steps.go-cache-restore.outputs.cache-hit != 'true'
-#      with:
-#        path: |
-#          ${{ steps.go-cache-paths.outputs.GOMODCACHE_PATH }}
-#          ${{ steps.go-cache-paths.outputs.GOCACHE_PATH }}
-#          ${{ env.GITHUB_WORKSPACE }}/.datadog
-#          ${{ steps.go-cache-paths.outputs.GOPATH }}/bin/orchestrion
-#        key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
-
-
