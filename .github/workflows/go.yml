@@ -25,10 +25,9 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: '1.24'
-        cache: 'false'
 
     - name: Configure Datadog Test Optimization
-      uses: datadog/test-visibility-github-action@4352c13a56a4d0c8dc3c78463dda969e86178c99
+      uses: datadog/test-visibility-github-action@7c496eaae9fb4cc47068953a70f5fdcc5ad457d1
       with:
         languages: go
         api_key: ${{secrets.DD_API_KEY}}
