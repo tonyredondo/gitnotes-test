@@ -4,14 +4,43 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
-	// "time" // Only needed for the main example, not the core API
 )
+
+// NoteNotFoundError is returned when a note does not exist for the given commit SHA.
+type NoteNotFoundError struct {
+	Namespace string
+	CommitSha string
+}
+
+func (e *NoteNotFoundError) Error() string {
+	return "note not found for commit " + e.CommitSha + " in namespace " + e.Namespace
+}
+
+func IsNoteNotFound(err error) bool {
+	var nf *NoteNotFoundError
+	return errors.As(err, &nf)
+}
+
+// InvalidCommitShaError is returned when the commit SHA does not exist or is invalid.
+type InvalidCommitShaError struct {
+	CommitSha string
+}
+
+func (e *InvalidCommitShaError) Error() string {
+	return "invalid or non-existent commit SHA: " + e.CommitSha
+}
+
+func IsInvalidCommitSha(err error) bool {
+	var nf *InvalidCommitShaError
+	return errors.As(err, &nf)
+}
 
 // formatNamespaceRef ensures the namespace has the correct prefix for git.
 // If the namespace already starts with "refs/notes/", it's returned as is.
@@ -63,9 +92,13 @@ func GetNote(namespace, commitSha string) (string, error) {
 		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "no note found for object") ||
-			strings.Contains(err.Error(), "failed to get note") {
-			return "", nil // Not an error, just no note
+		errStr := err.Error()
+		if strings.Contains(errStr, "no note found for object") ||
+			strings.Contains(errStr, "failed to get note") {
+			return "", &NoteNotFoundError{Namespace: namespace, CommitSha: commitSha}
+		}
+		if strings.Contains(errStr, "fatal: failed to resolve") {
+			return "", &InvalidCommitShaError{CommitSha: commitSha}
 		}
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
 	}
@@ -296,7 +329,7 @@ func GetNoteJSON[T any](namespace, commitSha string) ([]T, error) {
 		// Check if the error is specifically because the note wasn't found.
 		// `git notes show SHA` exits with 1 if no note for SHA.
 		// Our GetNote wraps this. We look for "failed to get note" and underlying "exit status 1".
-		if strings.Contains(err.Error(), "failed to get note") {
+		if IsNoteNotFound(err) {
 			// Consider if "exit status 1" from underlying git command is a reliable indicator.
 			// If GetNote's error indicates the note simply doesn't exist, return an empty slice and no error.
 			return nil, nil // Or []T{}, nil

@@ -119,17 +119,15 @@ func TestGitNoteOperations(t *testing.T) {
 		_, err = GetNote(namespace, "nonexistentsha")
 		if err == nil {
 			t.Error("GetNote: expected error for non-existent SHA, got nil")
+		} else if !IsInvalidCommitSha(err) {
+			t.Errorf("GetNote: expected NoteNotFoundError for non-existent SHA, got: %v", err)
 		}
+
 		_, err = GetNote(namespace, commitSha2) // Note not set yet for commitSha2
 		if err == nil {
 			t.Error("GetNote: expected error for unset note for commitSha2, got nil")
-		} else {
-			// Check that we get an error because the note doesn't exist.
-			// `git notes show SHA` exits with 1 if no note for SHA.
-			// Our wrapper should reflect this.
-			if !strings.Contains(err.Error(), "failed to get note") {
-				t.Errorf("GetNote: expected 'failed to get note' error for unset note, got: %v", err)
-			}
+		} else if !IsNoteNotFound(err) {
+			t.Errorf("GetNote: expected NoteNotFoundError for unset note, got: %v", err)
 		}
 	})
 
@@ -302,6 +300,8 @@ func TestGitNoteOperations(t *testing.T) {
 		_, err = GetNote(namespace, commitSha1)
 		if err == nil {
 			t.Error("GetNote after DeleteNote: expected error (note not found), got nil")
+		} else if !IsNoteNotFound(err) {
+			t.Errorf("GetNote after DeleteNote: expected NoteNotFoundError, got: %v", err)
 		}
 
 		// Try deleting a non-existent note (already deleted)
@@ -461,7 +461,7 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 
 	t.Run("GetNoteJSON_NonExistentNote_ReturnsEmptySlice", func(t *testing.T) {
 		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, "nonexistentcommitshaforjsongeneric")
-		if err != nil {
+		if !IsInvalidCommitSha(err) {
 			t.Fatalf("GetNoteJSON[MyCustomData] for non-existent note failed: %v", err)
 		}
 		if retrievedSlice != nil && len(retrievedSlice) != 0 {
