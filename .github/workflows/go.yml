@@ -33,6 +33,4 @@ jobs:
         api_key: ${{secrets.DD_API_KEY}}
 
     - name: Run
-      run: |
-        go run ./...
-
+      run: go run ./...
