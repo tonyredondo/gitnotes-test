@@ -111,12 +111,9 @@ func SetNote(namespace, commitSha, value string) error {
 	var stderrOutput string
 	var err error
 	if commitSha == "" {
-		// If commitSha is empty, we set the note for HEAD.
-		// This is a special case where we don't need to specify a commit SHA.
-		stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value)
-	} else {
-		stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+		commitSha, _, err = executeGitCommand("rev-parse", "HEAD")
 	}
+	stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
 	if err != nil {
 		return fmt.Errorf("failed to set note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
 	}
