@@ -85,12 +85,9 @@ func GetNote(namespace, commitSha string) (string, error) {
 	var stdout string
 	var err error
 	if commitSha == "" {
-		// If commitSha is empty, we set the note for HEAD.
-		// This is a special case where we don't need to specify a commit SHA.
-		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show")
-	} else {
-		stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
+		commitSha, _, err = executeGitCommand("rev-parse", "HEAD")
 	}
+	stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "no note found for object") ||
