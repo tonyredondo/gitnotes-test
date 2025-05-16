@@ -209,6 +209,23 @@ func FetchNotes(namespace, remoteName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w", namespace, fullRefSpec, remoteName, stderrOutput, err)
 	}
+
+	// After fetching notes, ensure all referenced commits exist locally
+	listOutput, _, err := executeGitCommand("notes", "--ref", localRef, "list")
+	if err == nil && listOutput != "" {
+		scanner := bufio.NewScanner(strings.NewReader(listOutput))
+		for scanner.Scan() {
+			parts := strings.Fields(scanner.Text())
+			if len(parts) >= 2 {
+				commitSha := parts[1]
+				_, _, tsErr := executeGitCommand("show", "-s", "--format=%ct", commitSha)
+				if tsErr != nil && strings.Contains(tsErr.Error(), "bad object") {
+					// Try to fetch the missing commit from remote
+					_, _, _ = executeGitCommand("fetch", remoteName, commitSha)
+				}
+			}
+		}
+	}
 	return nil
 }
 
