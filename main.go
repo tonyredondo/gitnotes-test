@@ -36,13 +36,17 @@ func main() {
 	fmt.Println(shas)
 
 	fmt.Println("Notes:")
+	var duration time.Duration
 	for _, sha := range shas {
+		start := time.Now()
 		note, err := manager.GetNote(sha)
+		duration += time.Since(start)
 		if err != nil {
 			fmt.Println("Error getting note:", err)
 		}
 		fmt.Println(sha, note)
 	}
+	fmt.Println("Duration:", duration)
 
 	fmt.Println("Notes with Bulk:")
 	bnotes, berrors := manager.GetNotesBulk(shas)
