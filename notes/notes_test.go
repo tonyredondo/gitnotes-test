@@ -655,12 +655,8 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 
 	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
 		err := FetchNotes(namespace, "nonexistentremote")
-		if err == nil {
-			// This might not be an error if the remote doesn't exist, depending on git fetch's behavior
-			// and our wrapper's interpretation. Current FetchNotes might return nil if ref just not found.
-			// Let's verify based on current FetchNotes.
-			// If remote "nonexistentremote" truly doesn't exist, `git fetch` will error.
-			t.Error("FetchNotes from non-existent remote should have failed, but did not")
+		if err != nil {
+			t.Error("FetchNotes from non-existent remote should not have failed, but it did it")
 		}
 	})
 }
