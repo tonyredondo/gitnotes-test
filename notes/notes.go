@@ -2,6 +2,7 @@ package notes
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -20,20 +21,47 @@ const (
 
 // GetNote retrieves the content of a note for a specific commit SHA in a namespace.
 func GetNote(namespace, commitSha string) (string, error) {
-	ref := formatNamespaceRef(namespace)
-	var stdout string
-	var err error
-	if commitSha == "" {
-		commitSha, _, err = executeGitCommand("rev-parse", "HEAD")
+	return GetNoteWithContext(context.Background(), namespace, commitSha)
+}
+
+// GetNoteWithContext retrieves the content of a note with context support for cancellation
+func GetNoteWithContext(ctx context.Context, namespace, commitSha string) (string, error) {
+	if err := validateCommitSHA(commitSha); err != nil {
+		return "", err
 	}
-	stdout, _, err = executeGitCommand("notes", "--ref", ref, "show", commitSha)
+
+	ref := formatNamespaceRef(namespace)
+
+	if commitSha == "" {
+		var err error
+		commitSha, _, err = executeGitCommandContext(ctx, "rev-parse", "HEAD")
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve HEAD: %w", err)
+		}
+	}
+
+	stdout, stderr, err := executeGitCommandContext(ctx, "notes", "--ref", ref, "show", commitSha)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
 		errStr := err.Error()
+		stderrLower := strings.ToLower(stderr)
+
+		// Check exit code first
+		if strings.Contains(errStr, "exit code 1") &&
+			(strings.Contains(stderrLower, "no note found") ||
+				strings.Contains(stderrLower, "no notes found")) {
+			return "", &NoteNotFoundError{Namespace: namespace, CommitSha: commitSha}
+		}
+
 		if strings.Contains(errStr, "no note found for object") ||
 			strings.Contains(errStr, "failed to get note") {
 			return "", &NoteNotFoundError{Namespace: namespace, CommitSha: commitSha}
 		}
-		if strings.Contains(errStr, "fatal: failed to resolve") {
+		if strings.Contains(errStr, "fatal: failed to resolve") ||
+			strings.Contains(errStr, "exit code 128") {
 			return "", &InvalidCommitShaError{CommitSha: commitSha}
 		}
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
@@ -43,15 +71,27 @@ func GetNote(namespace, commitSha string) (string, error) {
 
 // SetNote sets (or overwrites) a note for a specific commit SHA in a namespace.
 func SetNote(namespace, commitSha, value string) error {
-	ref := formatNamespaceRef(namespace)
-	var stderrOutput string
-	var err error
-	if commitSha == "" {
-		commitSha, _, err = executeGitCommand("rev-parse", "HEAD")
+	if err := validateCommitSHA(commitSha); err != nil {
+		return err
 	}
-	stderrOutput, _, err = executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+
+	if len(value) > MaxNoteSize {
+		return &NoteSizeExceededError{Size: len(value), MaxSize: MaxNoteSize}
+	}
+
+	ref := formatNamespaceRef(namespace)
+
+	if commitSha == "" {
+		var err error
+		commitSha, _, err = executeGitCommand("rev-parse", "HEAD")
+		if err != nil {
+			return fmt.Errorf("failed to resolve HEAD: %w", err)
+		}
+	}
+
+	stdout, stderr, err := executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
 	if err != nil {
-		return fmt.Errorf("failed to set note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
+		return fmt.Errorf("failed to set note for %s in %s (stdout: %s | stderr: %s): %w", commitSha, ref, stdout, stderr, err)
 	}
 	return nil
 }
