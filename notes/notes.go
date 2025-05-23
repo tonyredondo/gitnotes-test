@@ -106,41 +106,34 @@ type commitInfo struct {
 // sorted in reverse chronological order (newest first).
 func GetNoteList(namespace string) ([]string, error) {
 	ref := formatNamespaceRef(namespace)
-	var commitsWithNotes []commitInfo
 
 	listOutput, _, err := executeGitCommand("notes", "--ref", ref, "list")
 	if err != nil {
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "bad notes ref") || strings.Contains(errMsg, "does not exist") || strings.Contains(errMsg, "no notes found") {
-			return []string{}, nil // Return empty slice, not nil, for consistency
+		if strings.Contains(errMsg, "bad notes ref") || strings.Contains(errMsg, "does not exist") ||
+			strings.Contains(errMsg, "no notes found") || strings.Contains(errMsg, "exit code 1") {
+			return []string{}, nil
 		}
 		return nil, fmt.Errorf("failed to list notes in %s: %w", ref, err)
 	}
 
 	if listOutput == "" {
-		return []string{}, nil // No notes in this namespace
+		return []string{}, nil
 	}
+
+	// Collect all commit SHAs
+	var commitShas []string
+	shaToNoteObj := make(map[string]string)
 
 	scanner := bufio.NewScanner(strings.NewReader(listOutput))
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
-			commitSha := parts[1] // The commit SHA
-
-			// Get the committer timestamp for this SHA
-			// %ct gives committer date, UNIX timestamp
-			tsOutput, _, tsErr := executeGitCommand("show", "-s", "--format=%ct", commitSha)
-			if tsErr != nil {
-				// If we can't get the timestamp, we might skip this commit or handle error
-				// For now, let's return an error as it disrupts sorting.
-				return nil, fmt.Errorf("failed to get timestamp for commit %s: %w", commitSha, tsErr)
-			}
-			timestamp, convErr := strconv.ParseInt(strings.TrimSpace(tsOutput), 10, 64)
-			if convErr != nil {
-				return nil, fmt.Errorf("failed to parse timestamp for commit %s ('%s'): %w", commitSha, tsOutput, convErr)
-			}
-			commitsWithNotes = append(commitsWithNotes, commitInfo{Sha: commitSha, Timestamp: timestamp})
+			noteObj := parts[0]
+			commitSha := parts[1]
+			commitShas = append(commitShas, commitSha)
+			shaToNoteObj[commitSha] = noteObj
 		}
 	}
 
@@ -148,7 +141,34 @@ func GetNoteList(namespace string) ([]string, error) {
 		return nil, fmt.Errorf("error scanning 'git notes list' output for %s: %w", ref, err)
 	}
 
-	// Sort the commits by timestamp in descending order (newest first)
+	if len(commitShas) == 0 {
+		return []string{}, nil
+	}
+
+	// Get all timestamps in one batch call
+	args := append([]string{"show", "-s", "--format=%H %ct"}, commitShas...)
+	timestampOutput, _, err := executeGitCommand(args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get timestamps for commits: %w", err)
+	}
+
+	// Parse timestamps
+	var commitsWithNotes []commitInfo
+	timestampScanner := bufio.NewScanner(strings.NewReader(timestampOutput))
+	for timestampScanner.Scan() {
+		line := timestampScanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			sha := parts[0]
+			timestamp, err := strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse timestamp for commit %s: %w", sha, err)
+			}
+			commitsWithNotes = append(commitsWithNotes, commitInfo{Sha: sha, Timestamp: timestamp})
+		}
+	}
+
+	// Sort by timestamp in descending order (newest first)
 	sort.Slice(commitsWithNotes, func(i, j int) bool {
 		return commitsWithNotes[i].Timestamp > commitsWithNotes[j].Timestamp
 	})
@@ -167,10 +187,20 @@ func DeleteNote(namespace, commitSha string) error {
 	if commitSha == "" {
 		return fmt.Errorf("commitSha cannot be empty")
 	}
+
+	if err := validateCommitSHA(commitSha); err != nil {
+		return err
+	}
+
 	ref := formatNamespaceRef(namespace)
-	_, stderrOutput, err := executeGitCommand("notes", "--ref", ref, "remove", commitSha)
+	_, stderr, err := executeGitCommand("notes", "--ref", ref, "remove", commitSha)
 	if err != nil {
-		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, ref, stderrOutput, err)
+		// Check if the note doesn't exist (not an error in delete context)
+		if strings.Contains(stderr, "object has no note") ||
+			strings.Contains(err.Error(), "exit code 1") {
+			return nil // Idempotent delete
+		}
+		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, ref, stderr, err)
 	}
 	return nil
 }
@@ -186,10 +216,21 @@ func FetchNotes(namespace, remoteName string) error {
 	// e.g., refs/notes/mynamespace:refs/notes/mynamespace
 	fullRefSpec := fmt.Sprintf("%s:%s", localRef, localRef)
 
-	// 1. Fetch the notes reference itself. This is critical.
+	// 1. Fetch the notes reference itself
 	_, stderrOutput, err := executeGitCommand("fetch", "--force", remoteName, fullRefSpec)
 	if err != nil {
-		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w", namespace, fullRefSpec, remoteName, stderrOutput, err)
+		// Check if the error is because the remote ref doesn't exist
+		stderrLower := strings.ToLower(stderrOutput)
+		if strings.Contains(stderrLower, "couldn't find remote ref") ||
+			strings.Contains(stderrLower, "no such ref") ||
+			strings.Contains(stderrLower, "fetch-pack: invalid refspec") ||
+			strings.Contains(err.Error(), "exit status 1") ||
+			strings.Contains(err.Error(), "exit status 128") {
+			// Remote doesn't have this notes ref yet, not an error
+			return nil
+		}
+		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w",
+			namespace, fullRefSpec, remoteName, stderrOutput, err)
 	}
 
 	// 2. After fetching notes, list all commits referenced by these notes.
