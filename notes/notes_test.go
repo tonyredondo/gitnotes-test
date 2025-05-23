@@ -97,18 +97,18 @@ func TestGitNoteOperations(t *testing.T) {
 		}
 	}()
 
-	namespace := "test-string-namespace"
+	manager := NewNotesManager("test-string-namespace")
 	note1Content := "This is a note for commit 1 - " + time.Now().Format(time.RFC3339Nano)
 	note2Content := "This is an updated note for commit 1 - " + time.Now().Format(time.RFC3339Nano)
 	note3Content := "This is a note for commit 2 - " + time.Now().Format(time.RFC3339Nano)
 
 	t.Run("SetAndGetNote_String", func(t *testing.T) {
-		err := SetNote(namespace, commitSha1, note1Content)
+		err := manager.SetNote(commitSha1, note1Content)
 		if err != nil {
 			t.Fatalf("SetNote failed: %v", err)
 		}
 
-		retrieved, err := GetNote(namespace, commitSha1)
+		retrieved, err := manager.GetNote(commitSha1)
 		if err != nil {
 			t.Fatalf("GetNote failed: %v", err)
 		}
@@ -116,14 +116,14 @@ func TestGitNoteOperations(t *testing.T) {
 			t.Errorf("GetNote: expected '%s', got '%s'", note1Content, retrieved)
 		}
 
-		_, err = GetNote(namespace, "nonexistentsha")
+		_, err = manager.GetNote("nonexistentsha")
 		if err == nil {
 			t.Error("GetNote: expected error for non-existent SHA, got nil")
 		} else if !IsInvalidCommitSha(err) {
 			t.Errorf("GetNote: expected NoteNotFoundError for non-existent SHA, got: %v", err)
 		}
 
-		_, err = GetNote(namespace, commitSha2) // Note not set yet for commitSha2
+		_, err = manager.GetNote(commitSha2) // Note not set yet for commitSha2
 		if err == nil {
 			t.Error("GetNote: expected error for unset note for commitSha2, got nil")
 		} else if !IsNoteNotFound(err) {
@@ -132,16 +132,16 @@ func TestGitNoteOperations(t *testing.T) {
 	})
 
 	t.Run("OverwriteNote_String", func(t *testing.T) {
-		err := SetNote(namespace, commitSha1, note1Content)
+		err := manager.SetNote(commitSha1, note1Content)
 		if err != nil {
 			t.Fatalf("SetNote (initial) failed: %v", err)
 		}
-		err = SetNote(namespace, commitSha1, note2Content)
+		err = manager.SetNote(commitSha1, note2Content)
 		if err != nil {
 			t.Fatalf("SetNote (overwrite) failed: %v", err)
 		}
 
-		retrieved, err := GetNote(namespace, commitSha1)
+		retrieved, err := manager.GetNote(commitSha1)
 		if err != nil {
 			t.Fatalf("GetNote after overwrite failed: %v", err)
 		}
@@ -152,25 +152,26 @@ func TestGitNoteOperations(t *testing.T) {
 
 	t.Run("GetNoteList_ReturnsSHAs", func(t *testing.T) {
 		// Ensure a clean state for this specific sub-test if needed, or ensure unique namespace
-		testNamespace := namespace + "-getlist-sha"
-		// Clean up any old notes in this namespace for the test commits, just in case.
-		_ = DeleteNote(testNamespace, commitSha1)
-		_ = DeleteNote(testNamespace, commitSha2)
+		testManager := NewNotesManager(manager.GetRef() + "-getlist-sha")
 
-		if err := SetNote(testNamespace, commitSha1, note1Content); err != nil {
+		// Clean up any old notes in this namespace for the test commits, just in case.
+		_ = testManager.DeleteNote(commitSha1)
+		_ = testManager.DeleteNote(commitSha2)
+
+		if err := testManager.SetNote(commitSha1, note1Content); err != nil {
 			t.Fatalf("Setup SetNote for commitSha1 failed: %v", err)
 		}
-		if err := SetNote(testNamespace, commitSha2, note2Content); err != nil {
+		if err := testManager.SetNote(commitSha2, note2Content); err != nil {
 			t.Fatalf("Setup SetNote for commitSha2 failed: %v", err)
 		}
 
 		// Add a third commit and note to make the test more robust
 		commitSha3 := createTestCommit(t, repoPath, "file3.txt", "content3", "Third commit for GetNoteList SHA test")
-		if err := SetNote(testNamespace, commitSha3, note3Content); err != nil {
+		if err := testManager.SetNote(commitSha3, note3Content); err != nil {
 			t.Fatalf("Setup SetNote for commitSha3 failed: %v", err)
 		}
 
-		retrievedShas, err := GetNoteList(testNamespace)
+		retrievedShas, err := testManager.GetNoteList()
 		if err != nil {
 			t.Fatalf("GetNoteList failed: %v", err)
 		}
@@ -192,7 +193,7 @@ func TestGitNoteOperations(t *testing.T) {
 		}
 
 		// Test with an empty namespace
-		emptyShas, err := GetNoteList("empty-sha-test-namespace")
+		emptyShas, err := NewNotesManager("empty-sha-test-namespace").GetNoteList()
 		if err != nil {
 			t.Fatalf("GetNoteList for empty namespace failed: %v", err)
 		}
@@ -201,13 +202,13 @@ func TestGitNoteOperations(t *testing.T) {
 		}
 
 		// Clean up notes added for this test
-		_ = DeleteNote(testNamespace, commitSha1)
-		_ = DeleteNote(testNamespace, commitSha2)
-		_ = DeleteNote(testNamespace, commitSha3)
+		_ = testManager.DeleteNote(commitSha1)
+		_ = testManager.DeleteNote(commitSha2)
+		_ = testManager.DeleteNote(commitSha3)
 	})
 
 	t.Run("GetNoteList_ReturnsSHAs_ReverseChronological", func(t *testing.T) {
-		testNamespace := namespace + "-getlist-sha-sorted"
+		testManager := NewNotesManager(manager.GetRef() + "-getlist-sha-sorted")
 
 		c1Content := "content for commit 1"
 		c1Msg := "Commit 1 message"
@@ -232,21 +233,21 @@ func TestGitNoteOperations(t *testing.T) {
 		// (Clean up notes, SetNotes, GetNoteList call, assertions)
 
 		// Clean up any old notes in this namespace for the test commits
-		_ = DeleteNote(testNamespace, sha1)
-		_ = DeleteNote(testNamespace, sha2)
-		_ = DeleteNote(testNamespace, sha3)
+		_ = testManager.DeleteNote(sha1)
+		_ = testManager.DeleteNote(sha2)
+		_ = testManager.DeleteNote(sha3)
 
-		if err := SetNote(testNamespace, sha1, "Note for sha1"); err != nil {
+		if err := testManager.SetNote(sha1, "Note for sha1"); err != nil {
 			t.Fatalf("SetNote for sha1 failed: %v", err)
 		}
-		if err := SetNote(testNamespace, sha2, "Note for sha2"); err != nil {
+		if err := testManager.SetNote(sha2, "Note for sha2"); err != nil {
 			t.Fatalf("SetNote for sha2 failed: %v", err)
 		}
-		if err := SetNote(testNamespace, sha3, "Note for sha3"); err != nil {
+		if err := testManager.SetNote(sha3, "Note for sha3"); err != nil {
 			t.Fatalf("SetNote for sha3 failed: %v", err)
 		}
 
-		retrievedShas, err := GetNoteList(testNamespace)
+		retrievedShas, err := testManager.GetNoteList()
 		if err != nil {
 			t.Fatalf("GetNoteList failed: %v", err)
 		}
@@ -273,7 +274,7 @@ func TestGitNoteOperations(t *testing.T) {
 		// }
 
 		// Test with an empty namespace (should also return empty slice, not nil)
-		emptyShas, err := GetNoteList("empty-sha-test-namespace-sorted")
+		emptyShas, err := NewNotesManager("empty-sha-test-namespace-sorted").GetNoteList()
 		if err != nil {
 			t.Fatalf("GetNoteList for empty namespace failed: %v", err)
 		}
@@ -282,22 +283,22 @@ func TestGitNoteOperations(t *testing.T) {
 		}
 
 		// Clean up notes
-		_ = DeleteNote(testNamespace, sha1)
-		_ = DeleteNote(testNamespace, sha2)
-		_ = DeleteNote(testNamespace, sha3)
+		_ = testManager.DeleteNote(sha1)
+		_ = testManager.DeleteNote(sha2)
+		_ = testManager.DeleteNote(sha3)
 	})
 
 	t.Run("DeleteNote_String", func(t *testing.T) {
-		if err := SetNote(namespace, commitSha1, note2Content); err != nil {
+		if err := manager.SetNote(commitSha1, note2Content); err != nil {
 			t.Fatalf("Setup SetNote for DeleteNote failed: %v", err)
 		}
 
-		err := DeleteNote(namespace, commitSha1)
+		err := manager.DeleteNote(commitSha1)
 		if err != nil {
 			t.Fatalf("DeleteNote failed: %v", err)
 		}
 
-		_, err = GetNote(namespace, commitSha1)
+		_, err = manager.GetNote(commitSha1)
 		if err == nil {
 			t.Error("GetNote after DeleteNote: expected error (note not found), got nil")
 		} else if !IsNoteNotFound(err) {
@@ -310,7 +311,7 @@ func TestGitNoteOperations(t *testing.T) {
 		// The current DeleteNote wrapper propagates the error from `git notes remove`.
 		// `git notes remove <sha>` when <sha> has no note (but notes ref exists) exits 0.
 		// `git notes --ref <nonexistent_ref> remove <sha>` exits 1.
-		err = DeleteNote(namespace, commitSha1) // Note already deleted for this SHA under this namespace
+		err = manager.DeleteNote(commitSha1) // Note already deleted for this SHA under this namespace
 		if err != nil {
 			// This behavior depends on the strictness of `git notes remove`.
 			// If it errors because the specific note object for the commit is gone, this test is fine.
@@ -323,7 +324,7 @@ func TestGitNoteOperations(t *testing.T) {
 		}
 
 		// Try deleting a note for a non-existent SHA
-		err = DeleteNote(namespace, "nonexistentsha")
+		err = manager.DeleteNote("nonexistentsha")
 		if err == nil {
 			t.Error("DeleteNote: expected error for non-existent SHA, got nil")
 		} else if !strings.Contains(err.Error(), "nonexistentsha") {
@@ -360,7 +361,7 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		}
 	}()
 
-	jsonNamespace := "test-json-generic-namespace"
+	jsonManager := NewNotesManager("test-json-generic-namespace")
 	fixedTime, _ := time.Parse(time.RFC3339, "2023-10-26T10:00:00Z")
 
 	data1 := MyCustomData{ID: "obj1", Name: "Object One", Count: 1, IsEnabled: true, Timestamp: fixedTime}
@@ -368,12 +369,12 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	data3 := MyCustomData{ID: "obj3", Name: "Object Three", Count: 3, IsEnabled: true, Timestamp: fixedTime.Add(2 * time.Hour)}
 
 	t.Run("SetNoteJSON_SingleObject_And_GetNoteJSON_RetrievesSliceOfOne", func(t *testing.T) {
-		err := SetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON1, data1)
+		err := SetNoteJSON[MyCustomData](jsonManager, commitShaJSON1, data1)
 		if err != nil {
 			t.Fatalf("SetNoteJSON[MyCustomData] failed: %v", err)
 		}
 
-		retrievedDataSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON1)
+		retrievedDataSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON1)
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] failed: %v", err)
 		}
@@ -387,17 +388,17 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	})
 
 	t.Run("SetNoteJSON_Overwrite_And_GetNoteJSON_RetrievesNewSliceOfOne", func(t *testing.T) {
-		err := SetNoteJSON(jsonNamespace, commitShaJSON1, data1) // Type inference can work for T
+		err := SetNoteJSON(jsonManager, commitShaJSON1, data1) // Type inference can work for T
 		if err != nil {
 			t.Fatalf("SetNoteJSON (initial) failed: %v", err)
 		}
 		// Overwrite with data2
-		err = SetNoteJSON(jsonNamespace, commitShaJSON1, data2)
+		err = SetNoteJSON(jsonManager, commitShaJSON1, data2)
 		if err != nil {
 			t.Fatalf("SetNoteJSON (overwrite) failed: %v", err)
 		}
 
-		retrievedDataSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON1)
+		retrievedDataSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON1)
 		if err != nil {
 			t.Fatalf("GetNoteJSON after overwrite failed: %v", err)
 		}
@@ -416,12 +417,12 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		concatenatedJSONs := string(json1Bytes) + string(json2Bytes) + string(json3Bytes)
 
 		// Use SetNote to manually set the concatenated string
-		err := SetNote(jsonNamespace, commitShaJSON2, concatenatedJSONs)
+		err := jsonManager.SetNote(commitShaJSON2, concatenatedJSONs)
 		if err != nil {
 			t.Fatalf("Failed to set concatenated JSON note: %v", err)
 		}
 
-		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON2)
+		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON2)
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] for concatenated JSONs failed: %v", err)
 		}
@@ -437,12 +438,12 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		json2Bytes, _ := json.Marshal(data2)
 		concatenatedJSONs := string(json1Bytes) + string(json2Bytes)
 
-		err := SetNote(jsonNamespace, commitShaJSON2, concatenatedJSONs)
+		err := jsonManager.SetNote(commitShaJSON2, concatenatedJSONs)
 		if err != nil {
 			t.Fatalf("Failed to set concatenated JSON note for pointer slice test: %v", err)
 		}
 
-		retrievedPtrSlice, err := GetNoteJSON[*MyCustomData](jsonNamespace, commitShaJSON2)
+		retrievedPtrSlice, err := GetNoteJSON[*MyCustomData](jsonManager, commitShaJSON2)
 		if err != nil {
 			t.Fatalf("GetNoteJSON[*MyCustomData] for concatenated JSONs failed: %v", err)
 		}
@@ -460,7 +461,7 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	})
 
 	t.Run("GetNoteJSON_NonExistentNote_ReturnsEmptySlice", func(t *testing.T) {
-		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, "nonexistentcommitshaforjsongeneric")
+		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonManager, "nonexistentcommitshaforjsongeneric")
 		if !IsInvalidCommitSha(err) {
 			t.Fatalf("GetNoteJSON[MyCustomData] for non-existent note failed: %v", err)
 		}
@@ -471,7 +472,7 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	})
 
 	t.Run("GetNoteJSON_NonExistentNamespace_ReturnsEmptySlice", func(t *testing.T) {
-		retrievedSlice, err := GetNoteJSON[MyCustomData]("non-existent-json-namespace", commitShaJSON1)
+		retrievedSlice, err := GetNoteJSON[MyCustomData](NewNotesManager("non-existent-json-namespace"), commitShaJSON1)
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] for non-existent namespace failed: %v", err)
 		}
@@ -481,11 +482,11 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	})
 
 	t.Run("GetNoteJSON_EmptyNoteContent_ReturnsEmptySlice", func(t *testing.T) {
-		err := SetNote(jsonNamespace, commitShaJSON1, "") // Set an empty note
+		err := jsonManager.SetNote(commitShaJSON1, "") // Set an empty note
 		if err != nil {
 			t.Fatalf("Failed to set empty note: %v", err)
 		}
-		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON1)
+		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON1)
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] for empty note content failed: %v", err)
 		}
@@ -499,12 +500,12 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		// Malformed: one valid JSON object followed by an unterminated one
 		malformedContent := string(json1Bytes) + `{"id":"obj2","name":"unterminated string`
 
-		err := SetNote(jsonNamespace, commitShaJSON2, malformedContent)
+		err := jsonManager.SetNote(commitShaJSON2, malformedContent)
 		if err != nil {
 			t.Fatalf("Failed to set malformed JSON note: %v", err)
 		}
 
-		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON2)
+		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON2)
 		if err == nil {
 			t.Fatal("GetNoteJSON[MyCustomData] expected error for malformed JSON stream, but got nil")
 		}
@@ -531,12 +532,12 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		json1Bytes, _ := json.Marshal(data1)
 		contentWithTrailingGarbage := string(json1Bytes) + "trailing garbage"
 
-		err := SetNote(jsonNamespace, commitShaJSON1, contentWithTrailingGarbage)
+		err := jsonManager.SetNote(commitShaJSON1, contentWithTrailingGarbage)
 		if err != nil {
 			t.Fatalf("SetNote failed for content with trailing garbage: %v", err)
 		}
 
-		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonNamespace, commitShaJSON1)
+		retrievedSlice, err := GetNoteJSON[MyCustomData](jsonManager, commitShaJSON1)
 		if err == nil {
 			t.Fatal("GetNoteJSON[MyCustomData]: expected an error due to trailing garbage data, but got nil")
 		}
@@ -562,8 +563,8 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 	// Clean up notes specifically created in this test suite if necessary,
 	// though setupTestRepo handles overall repo cleanup.
 	t.Cleanup(func() {
-		_ = DeleteNote(jsonNamespace, commitShaJSON1)
-		_ = DeleteNote(jsonNamespace, commitShaJSON2)
+		_ = jsonManager.DeleteNote(commitShaJSON1)
+		_ = jsonManager.DeleteNote(commitShaJSON2)
 	})
 }
 
@@ -599,42 +600,42 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 		}
 	}()
 
-	namespace := "remote-ops-namespace"
+	manager := NewNotesManager("remote-ops-namespace")
 	noteContent := "Note for remote testing - " + time.Now().Format(time.RFC3339Nano) // Plain string for this test
 
 	t.Run("PushAndFetchNotes_String", func(t *testing.T) {
-		if err := SetNote(namespace, localCommitSha, noteContent); err != nil {
+		if err := manager.SetNote(localCommitSha, noteContent); err != nil {
 			t.Fatalf("SetNote locally failed: %v", err)
 		}
 
-		if err := PushNotes(namespace, "testorigin"); err != nil {
+		if err := manager.PushNotes("testorigin"); err != nil {
 			t.Fatalf("PushNotes failed: %v", err)
 		}
 
-		expectedRemoteRefPath := filepath.Join(remoteRepoDir, formatNamespaceRef(namespace))
+		expectedRemoteRefPath := filepath.Join(remoteRepoDir, manager.GetRef())
 		if _, err := os.Stat(expectedRemoteRefPath); os.IsNotExist(err) {
-			stdout, _ := runCmd(t, "", "git", "-C", remoteRepoDir, "show", formatNamespaceRef(namespace)) // Check directly in bare repo
+			stdout, _ := runCmd(t, "", "git", "-C", remoteRepoDir, "show", manager.GetRef()) // Check directly in bare repo
 			// A simpler check for bare repo is to see if the ref exists
-			stdoutLsRemote, _ := runCmd(t, localRepoPath, "git", "ls-remote", "testorigin", formatNamespaceRef(namespace))
-			if !strings.Contains(stdoutLsRemote, formatNamespaceRef(namespace)) {
-				t.Logf("git show output from bare repo for %s:\n%s", formatNamespaceRef(namespace), stdout)
-				t.Errorf("Note ref '%s' not found in remote 'testorigin' after PushNotes. ls-remote output: %s", formatNamespaceRef(namespace), stdoutLsRemote)
+			stdoutLsRemote, _ := runCmd(t, localRepoPath, "git", "ls-remote", "testorigin", manager.GetRef())
+			if !strings.Contains(stdoutLsRemote, manager.GetRef()) {
+				t.Logf("git show output from bare repo for %s:\n%s", manager.GetRef(), stdout)
+				t.Errorf("Note ref '%s' not found in remote 'testorigin' after PushNotes. ls-remote output: %s", manager.GetRef(), stdoutLsRemote)
 			}
 		}
 
-		if err := DeleteNote(namespace, localCommitSha); err != nil {
+		if err := manager.DeleteNote(localCommitSha); err != nil {
 			t.Fatalf("DeleteNote locally failed: %v", err)
 		}
-		_, err = GetNote(namespace, localCommitSha)
+		_, err = manager.GetNote(localCommitSha)
 		if err == nil {
 			t.Fatal("Note still exists locally after delete, before FetchNotes test.")
 		}
 
-		if err := FetchNotes(namespace, "testorigin"); err != nil {
+		if err := manager.FetchNotes("testorigin"); err != nil {
 			t.Fatalf("FetchNotes failed: %v", err)
 		}
 
-		fetchedNote, err := GetNote(namespace, localCommitSha)
+		fetchedNote, err := manager.GetNote(localCommitSha)
 		if err != nil {
 			t.Fatalf("GetNote after FetchNotes failed: %v", err)
 		}
@@ -644,17 +645,17 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 	})
 
 	t.Run("PushToNonExistentRemote_String", func(t *testing.T) {
-		if err := SetNote(namespace, localCommitSha, "some note for non-existent remote"); err != nil {
+		if err := manager.SetNote(localCommitSha, "some note for non-existent remote"); err != nil {
 			t.Fatalf("SetNote locally failed: %v", err)
 		}
-		err := PushNotes(namespace, "nonexistentremote")
+		err := manager.PushNotes("nonexistentremote")
 		if err == nil {
 			t.Error("PushNotes to non-existent remote should have failed, but did not")
 		}
 	})
 
 	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
-		err := FetchNotes(namespace, "nonexistentremote")
+		err := manager.FetchNotes("nonexistentremote")
 		if err != nil {
 			t.Error("FetchNotes from non-existent remote should not have failed, but it did it")
 		}

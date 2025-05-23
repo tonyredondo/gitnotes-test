@@ -21,18 +21,43 @@ const (
 	DefaultRetryAttempts = 3
 )
 
+type NotesManager interface {
+	GetRef() string
+	GetNote(commitSha string) (string, error)
+	GetNoteWithContext(ctx context.Context, commitSha string) (string, error)
+	GetNotesBulk(commitShas []string) (map[string]string, map[string]error)
+	SetNote(commitSha, value string) error
+	GetNoteList() ([]string, error)
+	DeleteNote(commitSha string) error
+	FetchNotes(remoteName string) error
+	PushNotes(remoteName string) error
+	PushNotesWithRetry(remoteName string, maxRetries int) error
+}
+
+type notesManager struct {
+	ref string
+}
+
+// NewNotesManager creates a new notes manager for the given namespace
+func NewNotesManager(namespace string) NotesManager {
+	return &notesManager{ref: formatNamespaceRef(namespace)}
+}
+
+// GetRef returns the ref of the notes manager
+func (m *notesManager) GetRef() string {
+	return m.ref
+}
+
 // GetNote retrieves the content of a note for a specific commit SHA in a namespace.
-func GetNote(namespace, commitSha string) (string, error) {
-	return GetNoteWithContext(context.Background(), namespace, commitSha)
+func (m *notesManager) GetNote(commitSha string) (string, error) {
+	return m.GetNoteWithContext(context.Background(), commitSha)
 }
 
 // GetNoteWithContext retrieves the content of a note with context support for cancellation
-func GetNoteWithContext(ctx context.Context, namespace, commitSha string) (string, error) {
+func (m *notesManager) GetNoteWithContext(ctx context.Context, commitSha string) (string, error) {
 	if err := validateCommitSHA(commitSha); err != nil {
 		return "", err
 	}
-
-	ref := formatNamespaceRef(namespace)
 
 	if commitSha == "" {
 		var err error
@@ -42,7 +67,7 @@ func GetNoteWithContext(ctx context.Context, namespace, commitSha string) (strin
 		}
 	}
 
-	stdout, stderr, err := executeGitCommandContext(ctx, "notes", "--ref", ref, "show", commitSha)
+	stdout, stderr, err := executeGitCommandContext(ctx, "notes", "--ref", m.ref, "show", commitSha)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -55,24 +80,24 @@ func GetNoteWithContext(ctx context.Context, namespace, commitSha string) (strin
 		if strings.Contains(errStr, "exit code 1") &&
 			(strings.Contains(stderrLower, "no note found") ||
 				strings.Contains(stderrLower, "no notes found")) {
-			return "", &NoteNotFoundError{Namespace: namespace, CommitSha: commitSha}
+			return "", &NoteNotFoundError{Ref: m.ref, CommitSha: commitSha}
 		}
 
 		if strings.Contains(errStr, "no note found for object") ||
 			strings.Contains(errStr, "failed to get note") {
-			return "", &NoteNotFoundError{Namespace: namespace, CommitSha: commitSha}
+			return "", &NoteNotFoundError{Ref: m.ref, CommitSha: commitSha}
 		}
 		if strings.Contains(errStr, "fatal: failed to resolve") ||
 			strings.Contains(errStr, "exit code 128") {
 			return "", &InvalidCommitShaError{CommitSha: commitSha}
 		}
-		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
+		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, m.ref, err)
 	}
 	return stdout, nil
 }
 
 // GetNotesBulk retrieves notes for multiple commit SHAs in parallel
-func GetNotesBulk(namespace string, commitShas []string) (map[string]string, map[string]error) {
+func (m *notesManager) GetNotesBulk(commitShas []string) (map[string]string, map[string]error) {
 	results := make(map[string]string)
 	errors := make(map[string]error)
 
@@ -99,7 +124,7 @@ func GetNotesBulk(namespace string, commitShas []string) (map[string]string, map
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			note, err := GetNote(namespace, commitSha)
+			note, err := m.GetNote(commitSha)
 			mu.Lock()
 			if err != nil {
 				errors[commitSha] = err
@@ -115,7 +140,7 @@ func GetNotesBulk(namespace string, commitShas []string) (map[string]string, map
 }
 
 // SetNote sets (or overwrites) a note for a specific commit SHA in a namespace.
-func SetNote(namespace, commitSha, value string) error {
+func (m *notesManager) SetNote(commitSha, value string) error {
 	if err := validateCommitSHA(commitSha); err != nil {
 		return err
 	}
@@ -123,8 +148,6 @@ func SetNote(namespace, commitSha, value string) error {
 	if len(value) > MaxNoteSize {
 		return &NoteSizeExceededError{Size: len(value), MaxSize: MaxNoteSize}
 	}
-
-	ref := formatNamespaceRef(namespace)
 
 	if commitSha == "" {
 		var err error
@@ -134,9 +157,9 @@ func SetNote(namespace, commitSha, value string) error {
 		}
 	}
 
-	stdout, stderr, err := executeGitCommand("notes", "--ref", ref, "add", "-f", "-m", value, commitSha)
+	stdout, stderr, err := executeGitCommand("notes", "--ref", m.ref, "add", "-f", "-m", value, commitSha)
 	if err != nil {
-		return fmt.Errorf("failed to set note for %s in %s (stdout: %s | stderr: %s): %w", commitSha, ref, stdout, stderr, err)
+		return fmt.Errorf("failed to set note for %s in %s (stdout: %s | stderr: %s): %w", commitSha, m.ref, stdout, stderr, err)
 	}
 	return nil
 }
@@ -149,17 +172,15 @@ type commitInfo struct {
 
 // GetNoteList retrieves a list of commit SHAs that have notes in a given namespace,
 // sorted in reverse chronological order (newest first).
-func GetNoteList(namespace string) ([]string, error) {
-	ref := formatNamespaceRef(namespace)
-
-	listOutput, _, err := executeGitCommand("notes", "--ref", ref, "list")
+func (m *notesManager) GetNoteList() ([]string, error) {
+	listOutput, _, err := executeGitCommand("notes", "--ref", m.ref, "list")
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "bad notes ref") || strings.Contains(errMsg, "does not exist") ||
 			strings.Contains(errMsg, "no notes found") || strings.Contains(errMsg, "exit code 1") {
 			return []string{}, nil
 		}
-		return nil, fmt.Errorf("failed to list notes in %s: %w", ref, err)
+		return nil, fmt.Errorf("failed to list notes in %s: %w", m.ref, err)
 	}
 
 	if listOutput == "" {
@@ -183,7 +204,7 @@ func GetNoteList(namespace string) ([]string, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning 'git notes list' output for %s: %w", ref, err)
+		return nil, fmt.Errorf("error scanning 'git notes list' output for %s: %w", m.ref, err)
 	}
 
 	if len(commitShas) == 0 {
@@ -228,7 +249,7 @@ func GetNoteList(namespace string) ([]string, error) {
 }
 
 // DeleteNote removes a note for a specific commit SHA in a namespace.
-func DeleteNote(namespace, commitSha string) error {
+func (m *notesManager) DeleteNote(commitSha string) error {
 	if commitSha == "" {
 		return fmt.Errorf("commitSha cannot be empty")
 	}
@@ -237,29 +258,27 @@ func DeleteNote(namespace, commitSha string) error {
 		return err
 	}
 
-	ref := formatNamespaceRef(namespace)
-	_, stderr, err := executeGitCommand("notes", "--ref", ref, "remove", commitSha)
+	_, stderr, err := executeGitCommand("notes", "--ref", m.ref, "remove", commitSha)
 	if err != nil {
 		// Check if the note doesn't exist (not an error in delete context)
 		if strings.Contains(stderr, "object has no note") ||
 			strings.Contains(err.Error(), "exit code 1") {
 			return nil // Idempotent delete
 		}
-		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, ref, stderr, err)
+		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, m.ref, stderr, err)
 	}
 	return nil
 }
 
 // FetchNotes fetches notes from a remote for a specific namespace and attempts to update the local notes ref.
 // It uses `git fetch --force <remoteName> <refSpec>:<refSpec>` to overwrite local changes if divergence occurs.
-func FetchNotes(namespace, remoteName string) error {
+func (m *notesManager) FetchNotes(remoteName string) error {
 	if remoteName == "" {
 		return fmt.Errorf("remoteName cannot be empty")
 	}
-	localRef := formatNamespaceRef(namespace)
 	// The refspec fetches the remote notes ref and updates the local one with the same name.
 	// e.g., refs/notes/mynamespace:refs/notes/mynamespace
-	fullRefSpec := fmt.Sprintf("%s:%s", localRef, localRef)
+	fullRefSpec := fmt.Sprintf("%s:%s", m.ref, m.ref)
 
 	// 1. Fetch the notes reference itself
 	_, stderrOutput, err := executeGitCommand("fetch", "--force", remoteName, fullRefSpec)
@@ -275,13 +294,13 @@ func FetchNotes(namespace, remoteName string) error {
 			return nil
 		}
 		return fmt.Errorf("failed to fetch notes for namespace %s (refspec %s) from %s (stderr: %s): %w",
-			namespace, fullRefSpec, remoteName, stderrOutput, err)
+			m.ref, fullRefSpec, remoteName, stderrOutput, err)
 	}
 
 	// 2. After fetching notes, list all commits referenced by these notes.
 	// The original code proceeds even if listing notes fails or returns empty,
 	// so we'll maintain that behavior for this part.
-	listOutput, _, listErr := executeGitCommand("notes", "--ref", localRef, "list")
+	listOutput, _, listErr := executeGitCommand("notes", "--ref", m.ref, "list")
 
 	// Only proceed if listing notes was successful and produced output.
 	if listErr == nil && listOutput != "" {
@@ -320,18 +339,18 @@ func FetchNotes(namespace, remoteName string) error {
 
 // PushNotes fetches remote notes for the given namespace, merges them into the local notes
 // using the 'cat_sort_uniq' strategy, and then pushes the combined result to the remote.
-func PushNotes(namespace, remoteName string) error {
-	return PushNotesWithRetry(namespace, remoteName, DefaultRetryAttempts)
+func (m *notesManager) PushNotes(remoteName string) error {
+	return m.PushNotesWithRetry(remoteName, DefaultRetryAttempts)
 }
 
 // PushNotesWithRetry is like PushNotes but with configurable retry attempts
-func PushNotesWithRetry(namespace, remoteName string, maxRetries int) error {
+func (m *notesManager) PushNotesWithRetry(remoteName string, maxRetries int) error {
 	if remoteName == "" {
 		return fmt.Errorf("remoteName cannot be empty")
 	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		err := pushNotesAttempt(namespace, remoteName)
+		err := m.pushNotesAttempt(remoteName)
 		if err == nil {
 			return nil
 		}
@@ -356,16 +375,14 @@ func PushNotesWithRetry(namespace, remoteName string, maxRetries int) error {
 }
 
 // pushNotesAttempt performs a single attempt to push notes
-func pushNotesAttempt(namespace, remoteName string) error {
-	localRef := formatNamespaceRef(namespace) // e.g., refs/notes/my_namespace
-
+func (m *notesManager) pushNotesAttempt(remoteName string) error {
 	// First, ensure we're in a clean state (abort any previous merge)
 	// This is safe to run even if there's no merge in progress
-	_, _, _ = executeGitCommand("notes", "--ref", localRef, "merge", "--abort")
+	_, _, _ = executeGitCommand("notes", "--ref", m.ref, "merge", "--abort")
 
 	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
 	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
-	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, localRef)
+	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, m.ref)
 
 	remoteNotesExist := true
 	if fetchErr != nil {
@@ -382,7 +399,7 @@ func pushNotesAttempt(namespace, remoteName string) error {
 		} else {
 			// A more significant fetch error occurred.
 			return fmt.Errorf("failed to fetch notes from remote '%s' for ref '%s' before merge: %w; stderr: %s",
-				remoteName, localRef, fetchErr, fetchStderr)
+				remoteName, m.ref, fetchErr, fetchStderr)
 		}
 	}
 
@@ -390,15 +407,15 @@ func pushNotesAttempt(namespace, remoteName string) error {
 		// 2. Determine the remote-tracking ref name to merge from.
 		// Example: localRef="refs/notes/commits", remoteName="origin" -> remoteTrackingRef = "refs/remotes/origin/notes/commits"
 		var remoteTrackingRef string
-		if strings.HasPrefix(localRef, "refs/notes/") {
-			pathSuffix := strings.TrimPrefix(localRef, "refs/") // e.g., "notes/commits" or "notes/my_ns_suffix"
+		if strings.HasPrefix(m.ref, "refs/notes/") {
+			pathSuffix := strings.TrimPrefix(m.ref, "refs/") // e.g., "notes/commits" or "notes/my_ns_suffix"
 			remoteTrackingRef = fmt.Sprintf("refs/remotes/%s/%s", remoteName, pathSuffix)
 		} else {
-			return fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", localRef)
+			return fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", m.ref)
 		}
 
 		// Save the current local ref before merge attempt (for potential rollback)
-		localRefSHA, _, err := executeGitCommand("rev-parse", localRef)
+		localRefSHA, _, err := executeGitCommand("rev-parse", m.ref)
 		if err != nil {
 			// If local ref doesn't exist yet, that's okay
 			localRefSHA = ""
@@ -408,7 +425,7 @@ func pushNotesAttempt(namespace, remoteName string) error {
 		_, _, errVerifyRemoteRef := executeGitCommand("rev-parse", "--verify", remoteTrackingRef)
 		if errVerifyRemoteRef == nil {
 			// 3. Merge fetched remote notes into local notes using 'cat_sort_uniq' strategy
-			_, mergeStderr, mergeErr := executeGitCommand("notes", "--ref", localRef, "merge", "-s", "cat_sort_uniq", remoteTrackingRef)
+			_, mergeStderr, mergeErr := executeGitCommand("notes", "--ref", m.ref, "merge", "-s", "cat_sort_uniq", remoteTrackingRef)
 			if mergeErr != nil {
 				mergeStderrLower := strings.ToLower(mergeStderr)
 				// "Already up to date" or "nothing to merge" are not errors in this context.
@@ -416,19 +433,19 @@ func pushNotesAttempt(namespace, remoteName string) error {
 					!strings.Contains(mergeStderrLower, "nothing to merge") {
 
 					// Abort the failed merge to clean up state
-					_, _, _ = executeGitCommand("notes", "--ref", localRef, "merge", "--abort")
+					_, _, _ = executeGitCommand("notes", "--ref", m.ref, "merge", "--abort")
 
 					// If we had a local ref before, reset to it
 					if localRefSHA != "" {
-						_, _, _ = executeGitCommand("update-ref", localRef, strings.TrimSpace(localRefSHA))
+						_, _, _ = executeGitCommand("update-ref", m.ref, strings.TrimSpace(localRefSHA))
 					}
 
 					if strings.Contains(mergeStderrLower, "conflict") {
 						return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', conflict: %w; stderr: %s",
-							remoteTrackingRef, localRef, mergeErr, mergeStderr)
+							remoteTrackingRef, m.ref, mergeErr, mergeStderr)
 					}
 					return fmt.Errorf("failed to merge notes from '%s' into '%s': %w; stderr: %s",
-						remoteTrackingRef, localRef, mergeErr, mergeStderr)
+						remoteTrackingRef, m.ref, mergeErr, mergeStderr)
 				}
 			}
 		}
@@ -436,13 +453,13 @@ func pushNotesAttempt(namespace, remoteName string) error {
 
 	// 4. Push the (now potentially merged) local notes to the remote.
 	// This push should ideally be a fast-forward.
-	_, pushStderr, pushErr := executeGitCommand("push", remoteName, localRef)
+	_, pushStderr, pushErr := executeGitCommand("push", remoteName, m.ref)
 	if pushErr != nil {
 		// If this push still fails (e.g., non-fast-forward because someone *else* pushed notes
 		// *between* our fetch and this push), then the situation is a race condition.
 		// The user might need to re-run the operation.
 		return fmt.Errorf("failed to push merged notes ref '%s' to remote '%s': %w; stderr: %s",
-			localRef, remoteName, pushErr, pushStderr)
+			m.ref, remoteName, pushErr, pushStderr)
 	}
 
 	return nil
@@ -451,7 +468,7 @@ func pushNotesAttempt(namespace, remoteName string) error {
 // SetNoteJSON serializes the given value to JSON and stores it as a git note
 // using the generic type T for the value.
 // This function overwrites any existing note for the given commitSha with this single JSON object.
-func SetNoteJSON[T any](namespace, commitSha string, value T) error {
+func SetNoteJSON[T any](manager NotesManager, commitSha string, value T) error {
 	if commitSha == "" {
 		return fmt.Errorf("commitSha cannot be empty for SetNoteJSON")
 	}
@@ -462,18 +479,18 @@ func SetNoteJSON[T any](namespace, commitSha string, value T) error {
 	}
 
 	// Call the original SetNote with the JSON string
-	return SetNote(namespace, commitSha, string(jsonData))
+	return manager.SetNote(commitSha, string(jsonData))
 }
 
 // GetNoteJSON retrieves a git note, which may contain one or more concatenated JSON objects.
 // It deserializes each JSON object from the note content into elements of type T.
 // T is the type of the elements in the returned slice (e.g., MyStruct or *MyStruct).
-func GetNoteJSON[T any](namespace, commitSha string) ([]T, error) {
+func GetNoteJSON[T any](manager NotesManager, commitSha string) ([]T, error) {
 	if commitSha == "" {
 		return nil, fmt.Errorf("commitSha cannot be empty for GetNoteJSON")
 	}
 
-	noteContent, err := GetNote(namespace, commitSha)
+	noteContent, err := manager.GetNote(commitSha)
 	if err != nil {
 		// Check if the error is specifically because the note wasn't found.
 		// `git notes show SHA` exits with 1 if no note for SHA.

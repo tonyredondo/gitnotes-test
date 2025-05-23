@@ -7,12 +7,12 @@ import (
 
 // NoteNotFoundError is returned when a note does not exist for the given commit SHA.
 type NoteNotFoundError struct {
-	Namespace string
+	Ref       string
 	CommitSha string
 }
 
 func (e *NoteNotFoundError) Error() string {
-	return "note not found for commit " + e.CommitSha + " in namespace " + e.Namespace
+	return "note not found for commit " + e.CommitSha + " in ref " + e.Ref
 }
 
 func IsNoteNotFound(err error) bool {
