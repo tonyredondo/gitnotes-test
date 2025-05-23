@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+var errorMatcher = NewErrorMatcher()
+
 // formatNamespaceRef ensures the namespace has the correct prefix for git.
 // If the namespace already starts with "refs/notes/", it's returned as is.
 // Otherwise, "refs/notes/" is prepended.
@@ -28,32 +30,10 @@ func formatNamespaceRef(namespace string) string {
 // It allows empty strings (which will be resolved to HEAD), but checks for
 // potentially dangerous inputs and validates hex format.
 func validateCommitSHA(sha string) error {
-	if sha == "" {
-		return nil // Allow empty, will use HEAD
-	}
-
-	// Check for special Git syntax that might not be intended
-	if strings.HasPrefix(sha, "-") || strings.Contains(sha, "..") {
+	if !errorMatcher.ValidateCommitSHA(sha) {
 		return &InvalidCommitShaError{CommitSha: sha}
 	}
-
-	// Validate SHA format (4-40 hex chars)
-	if len(sha) < 4 || len(sha) > 40 {
-		return &InvalidCommitShaError{CommitSha: sha}
-	}
-
-	for _, c := range sha {
-		if !isHexChar(c) {
-			return &InvalidCommitShaError{CommitSha: sha}
-		}
-	}
-
 	return nil
-}
-
-// isHexChar checks if a rune is a valid hexadecimal character
-func isHexChar(c rune) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // executeGitCommand is a helper function to run git commands and capture their output and errors.

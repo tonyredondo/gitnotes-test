@@ -74,23 +74,14 @@ func (m *notesManager) GetNoteWithContext(ctx context.Context, commitSha string)
 		}
 
 		errStr := err.Error()
-		stderrLower := strings.ToLower(stderr)
-
-		// Check exit code first
-		if strings.Contains(errStr, "exit code 1") &&
-			(strings.Contains(stderrLower, "no note found") ||
-				strings.Contains(stderrLower, "no notes found")) {
+		if errorMatcher.IsNoteNotFoundError(errStr, stderr) {
 			return "", &NoteNotFoundError{Ref: m.ref, CommitSha: commitSha}
 		}
 
-		if strings.Contains(errStr, "no note found for object") ||
-			strings.Contains(errStr, "failed to get note") {
-			return "", &NoteNotFoundError{Ref: m.ref, CommitSha: commitSha}
-		}
-		if strings.Contains(errStr, "fatal: failed to resolve") ||
-			strings.Contains(errStr, "exit code 128") {
+		if errorMatcher.IsInvalidCommitError(errStr) {
 			return "", &InvalidCommitShaError{CommitSha: commitSha}
 		}
+
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, m.ref, err)
 	}
 	return stdout, nil
@@ -176,8 +167,7 @@ func (m *notesManager) GetNoteList() ([]string, error) {
 	listOutput, _, err := executeGitCommand("notes", "--ref", m.ref, "list")
 	if err != nil {
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "bad notes ref") || strings.Contains(errMsg, "does not exist") ||
-			strings.Contains(errMsg, "no notes found") || strings.Contains(errMsg, "exit code 1") {
+		if errorMatcher.IsNotesRefNotFoundError(errMsg) {
 			return []string{}, nil
 		}
 		return nil, fmt.Errorf("failed to list notes in %s: %w", m.ref, err)
@@ -261,8 +251,7 @@ func (m *notesManager) DeleteNote(commitSha string) error {
 	_, stderr, err := executeGitCommand("notes", "--ref", m.ref, "remove", commitSha)
 	if err != nil {
 		// Check if the note doesn't exist (not an error in delete context)
-		if strings.Contains(stderr, "object has no note") ||
-			strings.Contains(err.Error(), "exit code 1") {
+		if errorMatcher.IsDeleteNoteNotFoundError(stderr, err.Error()) {
 			return nil // Idempotent delete
 		}
 		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, m.ref, stderr, err)
@@ -284,12 +273,7 @@ func (m *notesManager) FetchNotes(remoteName string) error {
 	_, stderrOutput, err := executeGitCommand("fetch", "--force", remoteName, fullRefSpec)
 	if err != nil {
 		// Check if the error is because the remote ref doesn't exist
-		stderrLower := strings.ToLower(stderrOutput)
-		if strings.Contains(stderrLower, "couldn't find remote ref") ||
-			strings.Contains(stderrLower, "no such ref") ||
-			strings.Contains(stderrLower, "fetch-pack: invalid refspec") ||
-			strings.Contains(err.Error(), "exit status 1") ||
-			strings.Contains(err.Error(), "exit status 128") {
+		if errorMatcher.IsRemoteRefNotFoundError(stderrOutput, err.Error()) {
 			// Remote doesn't have this notes ref yet, not an error
 			return nil
 		}
@@ -356,9 +340,7 @@ func (m *notesManager) PushNotesWithRetry(remoteName string, maxRetries int) err
 		}
 
 		// Check if error is due to non-fast-forward (concurrent modification)
-		if strings.Contains(err.Error(), "non-fast-forward") ||
-			strings.Contains(err.Error(), "fetch first") ||
-			strings.Contains(err.Error(), "rejected") {
+		if errorMatcher.IsPushRetryableError(err.Error()) {
 			if attempt < maxRetries-1 {
 				// log.Printf("Push failed due to concurrent modification, retry %d/%d", attempt+1, maxRetries)
 				// Exponential backoff
@@ -389,12 +371,7 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 		// Check if the error is because the remote ref simply doesn't exist.
 		// This is common if notes haven't been pushed to this namespace on the remote yet.
 		// `git fetch` often exits with status 1 or 128 for "ref not found".
-		stderrLower := strings.ToLower(fetchStderr)
-		if strings.Contains(stderrLower, "couldn't find remote ref") ||
-			strings.Contains(stderrLower, "no such ref") ||
-			strings.Contains(stderrLower, "fetch-pack: invalid refspec") ||
-			(strings.Contains(fetchErr.Error(), "exit status 1") && fetchStderr == "") || // Can happen if ref not found
-			strings.Contains(fetchErr.Error(), "exit status 128") {
+		if errorMatcher.IsRemoteRefNotFoundError(fetchStderr, fetchErr.Error()) {
 			remoteNotesExist = false
 		} else {
 			// A more significant fetch error occurred.
@@ -427,10 +404,8 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 			// 3. Merge fetched remote notes into local notes using 'cat_sort_uniq' strategy
 			_, mergeStderr, mergeErr := executeGitCommand("notes", "--ref", m.ref, "merge", "-s", "cat_sort_uniq", remoteTrackingRef)
 			if mergeErr != nil {
-				mergeStderrLower := strings.ToLower(mergeStderr)
 				// "Already up to date" or "nothing to merge" are not errors in this context.
-				if !strings.Contains(mergeStderrLower, "already up to date") &&
-					!strings.Contains(mergeStderrLower, "nothing to merge") {
+				if !errorMatcher.IsMergeUpToDate(mergeStderr) {
 
 					// Abort the failed merge to clean up state
 					_, _, _ = executeGitCommand("notes", "--ref", m.ref, "merge", "--abort")
@@ -440,7 +415,7 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 						_, _, _ = executeGitCommand("update-ref", m.ref, strings.TrimSpace(localRefSHA))
 					}
 
-					if strings.Contains(mergeStderrLower, "conflict") {
+					if errorMatcher.IsMergeConflict(mergeStderr) {
 						return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', conflict: %w; stderr: %s",
 							remoteTrackingRef, m.ref, mergeErr, mergeStderr)
 					}
