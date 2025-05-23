@@ -1,83 +1,22 @@
-package main
+package notes
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// NoteNotFoundError is returned when a note does not exist for the given commit SHA.
-type NoteNotFoundError struct {
-	Namespace string
-	CommitSha string
-}
-
-func (e *NoteNotFoundError) Error() string {
-	return "note not found for commit " + e.CommitSha + " in namespace " + e.Namespace
-}
-
-func IsNoteNotFound(err error) bool {
-	var nf *NoteNotFoundError
-	return errors.As(err, &nf)
-}
-
-// InvalidCommitShaError is returned when the commit SHA does not exist or is invalid.
-type InvalidCommitShaError struct {
-	CommitSha string
-}
-
-func (e *InvalidCommitShaError) Error() string {
-	return "invalid or non-existent commit SHA: " + e.CommitSha
-}
-
-func IsInvalidCommitSha(err error) bool {
-	var nf *InvalidCommitShaError
-	return errors.As(err, &nf)
-}
-
-// formatNamespaceRef ensures the namespace has the correct prefix for git.
-// If the namespace already starts with "refs/notes/", it's returned as is.
-// Otherwise, "refs/notes/" is prepended.
-// If the namespace is empty, it uses git's default notes ref "refs/notes/commits".
-func formatNamespaceRef(namespace string) string {
-	if namespace == "" {
-		return "refs/notes/commits" // Default git notes ref
-	}
-	if strings.HasPrefix(namespace, "refs/notes/") {
-		return namespace
-	}
-	return "refs/notes/" + namespace
-}
-
-// executeGitCommand is a helper function to run git commands and capture their output and errors.
-// It returns stdout, stderr, and an error.
-func executeGitCommand(args ...string) (string, string, error) {
-	cmd := exec.Command("git", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Env = append(
-		os.Environ(),
-		"GIT_AUTHOR_NAME=Library Notes",
-		"GIT_AUTHOR_EMAIL=lib@example.com",
-		"GIT_COMMITTER_NAME=Library Notes",
-		"GIT_COMMITTER_EMAIL=lib@example.com",
-	)
-
-	err := cmd.Run()
-
-	if err != nil {
-		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
-	}
-	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), nil
-}
+const (
+	// MaxNoteSize is the maximum allowed size for a single note (10MB)
+	MaxNoteSize = 10 * 1024 * 1024
+	// MaxJSONObjects is the maximum number of JSON objects allowed in a single note
+	MaxJSONObjects = 1000
+	// DefaultRetryAttempts is the default number of retry attempts for push operations
+	DefaultRetryAttempts = 3
+)
 
 // GetNote retrieves the content of a note for a specific commit SHA in a namespace.
 func GetNote(namespace, commitSha string) (string, error) {
