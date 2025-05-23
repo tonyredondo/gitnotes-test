@@ -10,7 +10,7 @@ import (
 func main() {
 
 	fmt.Println("Creating manager... ")
-	manager := notes.NewNotesManager("dd_notes")
+	manager := notes.NewTimedNotesManager(notes.NewNotesManager("dd_notes"))
 
 	fmt.Println("Fetching notes... ")
 	err := manager.FetchNotes("origin")
@@ -63,7 +63,7 @@ func main() {
 	}
 
 	fmt.Println("Creating manager for JSON and fetching...")
-	jsonManager := notes.NewNotesManager("dd_notes_json")
+	jsonManager := notes.NewTimedNotesManager(notes.NewNotesManager("dd_notes_json"))
 	_ = jsonManager.FetchNotes("origin")
 	defer func() {
 		_ = jsonManager.PushNotes("origin")
