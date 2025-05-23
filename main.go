@@ -40,6 +40,11 @@ func main() {
 		fmt.Println(sha, note)
 	}
 
+	fmt.Println("Notes with Bulk:")
+	bnotes, berrors := notes.GetNotesBulk("dd_notes", shas)
+	fmt.Println(bnotes)
+	fmt.Println(berrors)
+
 	fmt.Println("Note content from HEAD:")
 	note, err := notes.GetNote("dd_notes", "")
 	if err != nil {

@@ -359,6 +359,10 @@ func PushNotesWithRetry(namespace, remoteName string, maxRetries int) error {
 func pushNotesAttempt(namespace, remoteName string) error {
 	localRef := formatNamespaceRef(namespace) // e.g., refs/notes/my_namespace
 
+	// First, ensure we're in a clean state (abort any previous merge)
+	// This is safe to run even if there's no merge in progress
+	_, _, _ = executeGitCommand("notes", "--ref", localRef, "merge", "--abort")
+
 	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
 	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
 	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, localRef)
@@ -393,6 +397,13 @@ func pushNotesAttempt(namespace, remoteName string) error {
 			return fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", localRef)
 		}
 
+		// Save the current local ref before merge attempt (for potential rollback)
+		localRefSHA, _, err := executeGitCommand("rev-parse", localRef)
+		if err != nil {
+			// If local ref doesn't exist yet, that's okay
+			localRefSHA = ""
+		}
+
 		// Verify the remote-tracking ref exists (it should if fetch was successful and remote had notes)
 		_, _, errVerifyRemoteRef := executeGitCommand("rev-parse", "--verify", remoteTrackingRef)
 		if errVerifyRemoteRef == nil {
@@ -403,6 +414,15 @@ func pushNotesAttempt(namespace, remoteName string) error {
 				// "Already up to date" or "nothing to merge" are not errors in this context.
 				if !strings.Contains(mergeStderrLower, "already up to date") &&
 					!strings.Contains(mergeStderrLower, "nothing to merge") {
+
+					// Abort the failed merge to clean up state
+					_, _, _ = executeGitCommand("notes", "--ref", localRef, "merge", "--abort")
+
+					// If we had a local ref before, reset to it
+					if localRefSHA != "" {
+						_, _, _ = executeGitCommand("update-ref", localRef, strings.TrimSpace(localRefSHA))
+					}
+
 					if strings.Contains(mergeStderrLower, "conflict") {
 						return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', conflict: %w; stderr: %s",
 							remoteTrackingRef, localRef, mergeErr, mergeStderr)
