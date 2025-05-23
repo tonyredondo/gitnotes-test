@@ -469,9 +469,6 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 // using the generic type T for the value.
 // This function overwrites any existing note for the given commitSha with this single JSON object.
 func SetNoteJSON[T any](manager NotesManager, commitSha string, value T) error {
-	if commitSha == "" {
-		return fmt.Errorf("commitSha cannot be empty for SetNoteJSON")
-	}
 	// Serialize the value to JSON
 	jsonData, err := json.Marshal(value)
 	if err != nil {
@@ -486,10 +483,6 @@ func SetNoteJSON[T any](manager NotesManager, commitSha string, value T) error {
 // It deserializes each JSON object from the note content into elements of type T.
 // T is the type of the elements in the returned slice (e.g., MyStruct or *MyStruct).
 func GetNoteJSON[T any](manager NotesManager, commitSha string) ([]T, error) {
-	if commitSha == "" {
-		return nil, fmt.Errorf("commitSha cannot be empty for GetNoteJSON")
-	}
-
 	noteContent, err := manager.GetNote(commitSha)
 	if err != nil {
 		// Check if the error is specifically because the note wasn't found.

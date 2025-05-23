@@ -9,6 +9,7 @@ import (
 
 func main() {
 
+	fmt.Println("Creating manager... ")
 	manager := notes.NewNotesManager("dd_notes")
 
 	fmt.Println("Fetching notes... ")
@@ -60,4 +61,27 @@ func main() {
 	if err != nil {
 		fmt.Println("Error setting note:", err)
 	}
+
+	fmt.Println("Creating manager for JSON and fetching...")
+	jsonManager := notes.NewNotesManager("dd_notes_json")
+	_ = jsonManager.FetchNotes("origin")
+	defer func() {
+		_ = jsonManager.PushNotes("origin")
+	}()
+
+	m := map[string]string{
+		"test":  "test",
+		"test2": "test2",
+	}
+	fmt.Println("Setting a new note with JSON...")
+	err = notes.SetNoteJSON(jsonManager, "", m)
+	if err != nil {
+		fmt.Println("Error setting note:", err)
+	}
+	fmt.Println("Getting note with JSON...")
+	jsonNotes, err := notes.GetNoteJSON[map[string]string](jsonManager, "")
+	if err != nil {
+		fmt.Println("Error getting note:", err)
+	}
+	fmt.Println(jsonNotes)
 }
