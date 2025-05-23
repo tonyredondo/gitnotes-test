@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -67,6 +69,49 @@ func GetNoteWithContext(ctx context.Context, namespace, commitSha string) (strin
 		return "", fmt.Errorf("failed to get note for %s in %s: %w", commitSha, ref, err)
 	}
 	return stdout, nil
+}
+
+// GetNotesBulk retrieves notes for multiple commit SHAs in parallel
+func GetNotesBulk(namespace string, commitShas []string) (map[string]string, map[string]error) {
+	results := make(map[string]string)
+	errors := make(map[string]error)
+
+	// Validate all SHAs first
+	for _, sha := range commitShas {
+		if err := validateCommitSHA(sha); err != nil {
+			errors[sha] = err
+		}
+	}
+
+	// Use goroutines with semaphore for parallel fetching
+	sem := make(chan struct{}, 10) // Limit concurrent operations
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, sha := range commitShas {
+		if _, hasError := errors[sha]; hasError {
+			continue // Skip invalid SHAs
+		}
+
+		wg.Add(1)
+		go func(commitSha string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			note, err := GetNote(namespace, commitSha)
+			mu.Lock()
+			if err != nil {
+				errors[commitSha] = err
+			} else {
+				results[commitSha] = note
+			}
+			mu.Unlock()
+		}(sha)
+	}
+
+	wg.Wait()
+	return results, errors
 }
 
 // SetNote sets (or overwrites) a note for a specific commit SHA in a namespace.
@@ -276,11 +321,46 @@ func FetchNotes(namespace, remoteName string) error {
 // PushNotes fetches remote notes for the given namespace, merges them into the local notes
 // using the 'cat_sort_uniq' strategy, and then pushes the combined result to the remote.
 func PushNotes(namespace, remoteName string) error {
+	return PushNotesWithRetry(namespace, remoteName, DefaultRetryAttempts)
+}
+
+// PushNotesWithRetry is like PushNotes but with configurable retry attempts
+func PushNotesWithRetry(namespace, remoteName string, maxRetries int) error {
+	if remoteName == "" {
+		return fmt.Errorf("remoteName cannot be empty")
+	}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := pushNotesAttempt(namespace, remoteName)
+		if err == nil {
+			return nil
+		}
+
+		// Check if error is due to non-fast-forward (concurrent modification)
+		if strings.Contains(err.Error(), "non-fast-forward") ||
+			strings.Contains(err.Error(), "fetch first") ||
+			strings.Contains(err.Error(), "rejected") {
+			if attempt < maxRetries-1 {
+				// log.Printf("Push failed due to concurrent modification, retry %d/%d", attempt+1, maxRetries)
+				// Exponential backoff
+				time.Sleep(time.Duration(attempt*attempt) * 100 * time.Millisecond)
+				continue
+			}
+		}
+
+		// Non-retryable error or last attempt
+		return err
+	}
+
+	return fmt.Errorf("push failed after %d attempts", maxRetries)
+}
+
+// pushNotesAttempt performs a single attempt to push notes
+func pushNotesAttempt(namespace, remoteName string) error {
 	localRef := formatNamespaceRef(namespace) // e.g., refs/notes/my_namespace
 
 	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
 	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
-	// fmt.Printf("PushNotes: Fetching remote notes for '%s' from '%s'...\n", localRef, remoteName)
 	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, localRef)
 
 	remoteNotesExist := true
@@ -288,16 +368,17 @@ func PushNotes(namespace, remoteName string) error {
 		// Check if the error is because the remote ref simply doesn't exist.
 		// This is common if notes haven't been pushed to this namespace on the remote yet.
 		// `git fetch` often exits with status 1 or 128 for "ref not found".
-		if strings.Contains(strings.ToLower(fetchStderr), "couldn't find remote ref") ||
-			strings.Contains(strings.ToLower(fetchStderr), "no such ref") ||
-			strings.Contains(strings.ToLower(fetchStderr), "fetch-pack: invalid refspec") ||
+		stderrLower := strings.ToLower(fetchStderr)
+		if strings.Contains(stderrLower, "couldn't find remote ref") ||
+			strings.Contains(stderrLower, "no such ref") ||
+			strings.Contains(stderrLower, "fetch-pack: invalid refspec") ||
 			(strings.Contains(fetchErr.Error(), "exit status 1") && fetchStderr == "") || // Can happen if ref not found
 			strings.Contains(fetchErr.Error(), "exit status 128") {
-			// fmt.Printf("PushNotes: Info: Remote '%s' does not have notes ref '%s'. No remote notes to merge.\n", remoteName, localRef)
 			remoteNotesExist = false
 		} else {
 			// A more significant fetch error occurred.
-			return fmt.Errorf("failed to fetch notes from remote '%s' for ref '%s' before merge: %w; stderr: %s", remoteName, localRef, fetchErr, fetchStderr)
+			return fmt.Errorf("failed to fetch notes from remote '%s' for ref '%s' before merge: %w; stderr: %s",
+				remoteName, localRef, fetchErr, fetchStderr)
 		}
 	}
 
@@ -309,48 +390,41 @@ func PushNotes(namespace, remoteName string) error {
 			pathSuffix := strings.TrimPrefix(localRef, "refs/") // e.g., "notes/commits" or "notes/my_ns_suffix"
 			remoteTrackingRef = fmt.Sprintf("refs/remotes/%s/%s", remoteName, pathSuffix)
 		} else {
-			return fmt.Errorf("internal programming error: localRef '%s' is not in the expected 'refs/notes/...' format", localRef)
+			return fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", localRef)
 		}
 
 		// Verify the remote-tracking ref exists (it should if fetch was successful and remote had notes)
 		_, _, errVerifyRemoteRef := executeGitCommand("rev-parse", "--verify", remoteTrackingRef)
-		if errVerifyRemoteRef != nil {
-			// This might happen if the remote ref truly doesn't exist and fetch indicated so,
-			// or if the remote-tracking ref naming convention is different than expected.
-			// fmt.Printf("PushNotes: Info: Remote tracking ref '%s' not found after fetch. Assuming no remote notes to merge.\n", remoteTrackingRef)
-		} else {
-			// 3. Merge fetched remote notes into local notes using 'cat_sort_uniq' strategy.
-			// fmt.Printf("PushNotes: Merging notes from '%s' into local '%s' using 'cat_sort_uniq' strategy...\n", remoteTrackingRef, localRef)
+		if errVerifyRemoteRef == nil {
+			// 3. Merge fetched remote notes into local notes using 'cat_sort_uniq' strategy
 			_, mergeStderr, mergeErr := executeGitCommand("notes", "--ref", localRef, "merge", "-s", "cat_sort_uniq", remoteTrackingRef)
 			if mergeErr != nil {
+				mergeStderrLower := strings.ToLower(mergeStderr)
 				// "Already up to date" or "nothing to merge" are not errors in this context.
-				if strings.Contains(strings.ToLower(mergeStderr), "already up to date") || strings.Contains(strings.ToLower(mergeStderr), "nothing to merge") {
-					// fmt.Printf("PushNotes: Info: Local notes '%s' already incorporate or are ahead of '%s'.\n", localRef, remoteTrackingRef)
-				} else if strings.Contains(strings.ToLower(mergeStderr), "conflict") {
-					// Even with 'cat_sort_uniq', fundamental conflicts could theoretically occur, or the merge command failed.
-					return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', possible conflict: %w; stderr: %s", remoteTrackingRef, localRef, mergeErr, mergeStderr)
-				} else {
-					return fmt.Errorf("failed to merge notes from '%s' into '%s': %w; stderr: %s", remoteTrackingRef, localRef, mergeErr, mergeStderr)
+				if !strings.Contains(mergeStderrLower, "already up to date") &&
+					!strings.Contains(mergeStderrLower, "nothing to merge") {
+					if strings.Contains(mergeStderrLower, "conflict") {
+						return fmt.Errorf("failed to automatically merge notes from '%s' into '%s' using 'cat_sort_uniq', conflict: %w; stderr: %s",
+							remoteTrackingRef, localRef, mergeErr, mergeStderr)
+					}
+					return fmt.Errorf("failed to merge notes from '%s' into '%s': %w; stderr: %s",
+						remoteTrackingRef, localRef, mergeErr, mergeStderr)
 				}
-			} else {
-				// fmt.Printf("PushNotes: Successfully merged remote notes into '%s'.\n", localRef)
 			}
 		}
 	}
 
 	// 4. Push the (now potentially merged) local notes to the remote.
 	// This push should ideally be a fast-forward.
-
-	// fmt.Printf("PushNotes: Pushing local notes ref '%s' to remote '%s'...\n", localRef, remoteName)
 	_, pushStderr, pushErr := executeGitCommand("push", remoteName, localRef)
 	if pushErr != nil {
 		// If this push still fails (e.g., non-fast-forward because someone *else* pushed notes
 		// *between* our fetch and this push), then the situation is a race condition.
 		// The user might need to re-run the operation.
-		return fmt.Errorf("failed to push merged notes ref '%s' to remote '%s': %w; stderr: %s", localRef, remoteName, pushErr, pushStderr)
+		return fmt.Errorf("failed to push merged notes ref '%s' to remote '%s': %w; stderr: %s",
+			localRef, remoteName, pushErr, pushStderr)
 	}
 
-	// fmt.Printf("PushNotes: Notes ref '%s' successfully pushed to remote '%s'.\n", localRef, remoteName)
 	return nil
 }
 
@@ -398,8 +472,13 @@ func GetNoteJSON[T any](namespace, commitSha string) ([]T, error) {
 
 	decoder := json.NewDecoder(strings.NewReader(noteContent))
 	var results []T // Initialize as nil slice
+	objectCount := 0
 
 	for decoder.More() {
+		if objectCount >= MaxJSONObjects {
+			return results, fmt.Errorf("exceeded maximum number of JSON objects (%d) in note", MaxJSONObjects)
+		}
+
 		var currentElem T // Create a zero value of type T (e.g., MyStruct{} or nil for *MyStruct)
 
 		// For pointer types T (e.g. *MyStruct), json.Decode needs a non-nil pointer to unmarshal into.
@@ -433,6 +512,7 @@ func GetNoteJSON[T any](namespace, commitSha string) ([]T, error) {
 			return results, fmt.Errorf("%s: %w", fullErrMsg, errDecode)
 		}
 		results = append(results, currentElem)
+		objectCount++
 	}
 
 	// If decoder.More() is false, the stream of valid JSON objects has ended.
