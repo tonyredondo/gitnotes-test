@@ -657,7 +657,7 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
 		err := manager.FetchNotes("nonexistentremote")
 		if err != nil {
-			t.Error("FetchNotes from non-existent remote should not have failed, but it did it")
+			t.Error("FetchNotes from non-existent remote should not have failed, but it did")
 		}
 	})
 }
