@@ -148,7 +148,14 @@ func (m *notesManager) SetNote(commitSha, value string) error {
 		}
 	}
 
-	stdout, stderr, err := executeGitCommand("notes", "--ref", m.ref, "add", "-f", "-m", value, commitSha)
+	if value == "" {
+		// Deleting the note achieves the same behavior as an empty note
+		return m.DeleteNote(commitSha)
+	}
+
+	stdout, stderr, err := executeGitCommand(
+		"notes", "--ref", m.ref, "add", "-f", "-m", value, commitSha,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to set note for %s in %s (stdout: %s | stderr: %s): %w", commitSha, m.ref, stdout, stderr, err)
 	}
