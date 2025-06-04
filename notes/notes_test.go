@@ -651,13 +651,17 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 		err := manager.PushNotes("nonexistentremote")
 		if err == nil {
 			t.Error("PushNotes to non-existent remote should have failed, but did not")
+		} else if !errorMatcher.IsRemoteRefNotFoundError(err.Error(), err.Error()) {
+			t.Fatalf("PushNotes to non-existent remote returned unexpected error: %v", err)
 		}
 	})
 
 	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
 		err := manager.FetchNotes("nonexistentremote")
 		if err != nil {
-			t.Error("FetchNotes from non-existent remote should not have failed, but it did it")
+			if !errorMatcher.IsRemoteRefNotFoundError(err.Error(), err.Error()) {
+				t.Fatalf("FetchNotes from non-existent remote returned unexpected error: %v", err)
+			}
 		}
 	})
 }
