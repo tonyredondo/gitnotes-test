@@ -340,6 +340,10 @@ func (m *notesManager) PushNotesWithRetry(remoteName string, maxRetries int) err
 		return fmt.Errorf("remoteName cannot be empty")
 	}
 
+	// There is still an unavoidable race window between fetching the remote notes ref and
+	// pushing our merged result: another collaborator can push new notes during that window.
+	// When that happens, the push attempt will fail with a non-fast-forward error. Retrying
+	// forces another fetch/merge cycle so the newly published notes are incorporated.
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		err := m.pushNotesAttempt(remoteName)
 		if err == nil {
@@ -363,6 +367,14 @@ func (m *notesManager) PushNotesWithRetry(remoteName string, maxRetries int) err
 	return fmt.Errorf("push failed after %d attempts", maxRetries)
 }
 
+func buildRemoteTrackingRef(remoteName, notesRef string) (string, error) {
+	if !strings.HasPrefix(notesRef, "refs/notes/") {
+		return "", fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", notesRef)
+	}
+	pathSuffix := strings.TrimPrefix(notesRef, "refs/")
+	return fmt.Sprintf("refs/remotes/%s/%s", remoteName, pathSuffix), nil
+}
+
 // pushNotesAttempt performs a single attempt to push notes
 func (m *notesManager) pushNotesAttempt(remoteName string) error {
 	// First, ensure we're in a clean state (abort any previous merge)
@@ -371,7 +383,13 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 
 	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
 	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
-	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, m.ref)
+	remoteTrackingRef, err := buildRemoteTrackingRef(remoteName, m.ref)
+	if err != nil {
+		return err
+	}
+
+	fetchRefspec := fmt.Sprintf("%s:%s", m.ref, remoteTrackingRef)
+	_, fetchStderr, fetchErr := executeGitCommand("fetch", remoteName, fetchRefspec)
 
 	remoteNotesExist := true
 	if fetchErr != nil {
@@ -388,15 +406,6 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 	}
 
 	if remoteNotesExist {
-		// 2. Determine the remote-tracking ref name to merge from.
-		// Example: localRef="refs/notes/commits", remoteName="origin" -> remoteTrackingRef = "refs/remotes/origin/notes/commits"
-		var remoteTrackingRef string
-		if strings.HasPrefix(m.ref, "refs/notes/") {
-			pathSuffix := strings.TrimPrefix(m.ref, "refs/") // e.g., "notes/commits" or "notes/my_ns_suffix"
-			remoteTrackingRef = fmt.Sprintf("refs/remotes/%s/%s", remoteName, pathSuffix)
-		} else {
-			return fmt.Errorf("internal error: localRef '%s' is not in the expected 'refs/notes/...' format", m.ref)
-		}
 
 		// Save the current local ref before merge attempt (for potential rollback)
 		localRefSHA, _, err := executeGitCommand("rev-parse", m.ref)
