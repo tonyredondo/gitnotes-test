@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect" // Required for reflect.DeepEqual
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -658,6 +659,121 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 		err := manager.FetchNotes("nonexistentremote")
 		if err != nil {
 			t.Error("FetchNotes from non-existent remote should not have failed, but it did")
+		}
+	})
+
+	t.Run("PushNotesMergesRemoteChanges", func(t *testing.T) {
+		conflictNamespace := "remote-ops-namespace-conflict"
+		conflictManager := NewNotesManager(conflictNamespace)
+		localNoteContent := "Local note content for conflict test - " + time.Now().Format(time.RFC3339Nano)
+		remoteNoteContent := "Remote note content for conflict test - " + time.Now().Format(time.RFC3339Nano)
+
+		// Ensure the commit exists in the remote repository so the secondary clone can access it.
+		runCmd(t, localRepoPath, "git", "push", "testorigin", "main")
+
+		// Clone the remote repository to simulate another collaborator that will push first.
+		otherRepoPath, errClone := os.MkdirTemp("", "testrepo-remote-conflict-clone-")
+		if errClone != nil {
+			t.Fatalf("Failed to create temp dir for secondary clone: %v", errClone)
+		}
+		defer os.RemoveAll(otherRepoPath)
+		runCmd(t, "", "git", "clone", remoteRepoDir, otherRepoPath)
+		runCmd(t, otherRepoPath, "git", "config", "user.email", "test@example.com")
+		runCmd(t, otherRepoPath, "git", "config", "user.name", "Test User")
+
+		// Create the remote note from the secondary clone and push it to the bare repository.
+		cwdBeforeClone, errCwd := os.Getwd()
+		if errCwd != nil {
+			t.Fatalf("Failed to get cwd before switching to clone: %v", errCwd)
+		}
+		if err := os.Chdir(otherRepoPath); err != nil {
+			t.Fatalf("Failed to change directory to secondary clone: %v", err)
+		}
+		cloneManager := NewNotesManager(conflictNamespace)
+		if err := cloneManager.SetNote(localCommitSha, remoteNoteContent); err != nil {
+			t.Fatalf("Clone SetNote failed: %v", err)
+		}
+		if err := cloneManager.PushNotes("origin"); err != nil {
+			t.Fatalf("Clone PushNotes failed: %v", err)
+		}
+		if err := os.Chdir(cwdBeforeClone); err != nil {
+			t.Fatalf("Failed to restore working directory after clone operations: %v", err)
+		}
+
+		// Local repository creates its own note without fetching remote changes to simulate divergence.
+		if err := conflictManager.SetNote(localCommitSha, localNoteContent); err != nil {
+			t.Fatalf("Local SetNote failed: %v", err)
+		}
+
+		if err := conflictManager.PushNotes("testorigin"); err != nil {
+			t.Fatalf("PushNotes should merge remote changes automatically, but failed: %v", err)
+		}
+
+		if err := conflictManager.FetchNotes("testorigin"); err != nil {
+			t.Fatalf("FetchNotes after push failed: %v", err)
+		}
+
+		mergedNote, err := conflictManager.GetNote(localCommitSha)
+		if err != nil {
+			t.Fatalf("GetNote after resolving conflict failed: %v", err)
+		}
+
+		if !strings.Contains(mergedNote, localNoteContent) || !strings.Contains(mergedNote, remoteNoteContent) {
+			t.Fatalf("Merged note should contain both local and remote content. Got: %q", mergedNote)
+		}
+	})
+
+	t.Run("PushNotesRetriesWhenRemoteChangesAfterFetch", func(t *testing.T) {
+		raceNamespace := "remote-ops-namespace-fetch-race"
+		raceManager := NewNotesManager(raceNamespace)
+		localRaceContent := "Local note content for fetch race test - " + time.Now().Format(time.RFC3339Nano)
+		remoteRaceContent := "Remote note content injected during fetch race - " + time.Now().Format(time.RFC3339Nano)
+
+		// Ensure commit exists on remote for any clones we create.
+		runCmd(t, localRepoPath, "git", "push", "testorigin", "main")
+
+		otherRepoPath, errClone := os.MkdirTemp("", "testrepo-remote-fetch-race-")
+		if errClone != nil {
+			t.Fatalf("Failed to create temp dir for fetch race clone: %v", errClone)
+		}
+		defer os.RemoveAll(otherRepoPath)
+		runCmd(t, "", "git", "clone", remoteRepoDir, otherRepoPath)
+		runCmd(t, otherRepoPath, "git", "config", "user.email", "test@example.com")
+		runCmd(t, otherRepoPath, "git", "config", "user.name", "Test User")
+
+		remoteRef := raceManager.GetRef()
+		var hookOnce sync.Once
+		cleanupHooks := setGitCommandHooksForTesting(nil, func(args []string) {
+			if len(args) >= 3 && args[0] == "fetch" && args[1] == "testorigin" && strings.HasPrefix(args[2], remoteRef+":") {
+				hookOnce.Do(func() {
+					// The secondary clone writes and pushes its own note only after the local push attempt
+					// has already fetched, leaving the local view stale.
+					runCmd(t, otherRepoPath, "git", "notes", "--ref", remoteRef, "add", "-f", "-m", remoteRaceContent, localCommitSha)
+					runCmd(t, otherRepoPath, "git", "push", "origin", remoteRef)
+				})
+			}
+		})
+		defer cleanupHooks()
+
+		if err := raceManager.SetNote(localCommitSha, localRaceContent); err != nil {
+			t.Fatalf("Local SetNote for fetch race failed: %v", err)
+		}
+
+		if err := raceManager.PushNotesWithRetry("testorigin", 3); err != nil {
+			t.Fatalf("PushNotesWithRetry should succeed after retrying when remote changes post-fetch: %v", err)
+		}
+
+		if err := raceManager.FetchNotes("testorigin"); err != nil {
+			t.Fatalf("FetchNotes after resolving fetch race failed: %v", err)
+		}
+
+		mergedNote, err := raceManager.GetNote(localCommitSha)
+		if err != nil {
+			t.Fatalf("GetNote after fetch race resolution failed: %v", err)
+		}
+
+		if !strings.Contains(mergedNote, localRaceContent) || !strings.Contains(mergedNote, remoteRaceContent) {
+			t.Fatalf("Merged note after fetch race should contain both contents. Got: %q", mergedNote)
 		}
 	})
 }

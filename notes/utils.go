@@ -8,9 +8,48 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 var errorMatcher = NewErrorMatcher()
+
+type gitCommandHook func(args []string)
+
+var (
+	gitHookMu            sync.RWMutex
+	beforeGitCommandHook gitCommandHook
+	afterGitCommandHook  gitCommandHook
+)
+
+func runGitCommandHook(before bool, args []string) {
+	gitHookMu.RLock()
+	var hook gitCommandHook
+	if before {
+		hook = beforeGitCommandHook
+	} else {
+		hook = afterGitCommandHook
+	}
+	gitHookMu.RUnlock()
+	if hook != nil {
+		hook(args)
+	}
+}
+
+func setGitCommandHooksForTesting(before, after gitCommandHook) func() {
+	gitHookMu.Lock()
+	prevBefore := beforeGitCommandHook
+	prevAfter := afterGitCommandHook
+	beforeGitCommandHook = before
+	afterGitCommandHook = after
+	gitHookMu.Unlock()
+
+	return func() {
+		gitHookMu.Lock()
+		beforeGitCommandHook = prevBefore
+		afterGitCommandHook = prevAfter
+		gitHookMu.Unlock()
+	}
+}
 
 // formatNamespaceRef ensures the namespace has the correct prefix for git.
 // If the namespace already starts with "refs/notes/", it's returned as is.
@@ -39,6 +78,10 @@ func validateCommitSHA(sha string) error {
 // executeGitCommand is a helper function to run git commands and capture their output and errors.
 // It returns stdout, stderr, and an error.
 func executeGitCommand(args ...string) (string, string, error) {
+	argsCopy := append([]string(nil), args...)
+	runGitCommandHook(true, argsCopy)
+	defer runGitCommandHook(false, argsCopy)
+
 	cmd := exec.Command("git", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -67,6 +110,10 @@ func executeGitCommand(args ...string) (string, string, error) {
 
 // executeGitCommandContext is like executeGitCommand but with context support for cancellation
 func executeGitCommandContext(ctx context.Context, args ...string) (string, string, error) {
+	argsCopy := append([]string(nil), args...)
+	runGitCommandHook(true, argsCopy)
+	defer runGitCommandHook(false, argsCopy)
+
 	cmd := exec.CommandContext(ctx, "git", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
