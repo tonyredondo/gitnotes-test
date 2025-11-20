@@ -333,6 +333,85 @@ func TestGitNoteOperations(t *testing.T) {
 			t.Errorf("DeleteNote: error for non-existent SHA should mention the SHA: %v", err)
 		}
 	})
+
+	t.Run("SetNote_AllowsRevSpec", func(t *testing.T) {
+		revManager := NewNotesManager("test-revspec-namespace")
+		revSpec := "HEAD~1"
+		noteContent := "note for revspec"
+
+		if err := revManager.SetNote(revSpec, noteContent); err != nil {
+			t.Fatalf("SetNote should accept rev-spec %s: %v", revSpec, err)
+		}
+
+		retrieved, err := revManager.GetNote(revSpec)
+		if err != nil {
+			t.Fatalf("GetNote for rev-spec %s failed: %v", revSpec, err)
+		}
+
+		if retrieved != noteContent {
+			t.Fatalf("GetNote for rev-spec returned unexpected content. Expected %q, got %q", noteContent, retrieved)
+		}
+	})
+}
+
+func TestPushNotes_NoLocalOrRemoteRefBootstrapsEmptyNamespace(t *testing.T) {
+	repoPath := setupTestRepo(t)
+	remoteDir := t.TempDir()
+
+	runCmd(t, remoteDir, "git", "init", "--bare")
+	runCmd(t, repoPath, "git", "remote", "add", "origin", remoteDir)
+
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("Failed to change CWD to repoPath %s: %v", repoPath, err)
+	}
+	defer func() {
+		if err := os.Chdir(originalCwd); err != nil {
+			t.Logf("Failed to restore CWD to %s: %v", originalCwd, err)
+		}
+	}()
+
+	manager := NewNotesManager("bootstrap-push-namespace")
+	if err := manager.PushNotes("origin"); err != nil {
+		t.Fatalf("PushNotes should bootstrap an empty namespace when neither local nor remote notes exist: %v", err)
+	}
+
+	// Local ref should now exist
+	if exists, err := notesRefExists(manager.GetRef()); err != nil {
+		t.Fatalf("failed to verify local ref existence: %v", err)
+	} else if !exists {
+		t.Fatalf("expected local notes ref %s to be created", manager.GetRef())
+	}
+
+	// Remote ref should have been created as well
+	cmd := exec.Command("git", "--git-dir", remoteDir, "show-ref", "refs/notes/bootstrap-push-namespace")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected remote notes ref to exist after bootstrap push, got error: %v", err)
+	}
+}
+
+func TestGetNoteList_PropagatesErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+
+	manager := NewNotesManager("error-propagation-namespace")
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Failed to change directory to tempDir: %v", err)
+	}
+	t.Cleanup(func() {
+		// Best effort to restore to previous CWD to avoid surprising other tests
+		_ = os.Chdir(originalCwd)
+	})
+
+	if _, err := manager.GetNoteList(); err == nil {
+		t.Fatalf("Expected GetNoteList to fail outside a git repository, but it returned nil error")
+	}
 }
 
 // --- Tests for JSON Note Operations ---
