@@ -381,6 +381,11 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 	// This is safe to run even if there's no merge in progress
 	_, _, _ = executeGitCommand("notes", "--ref", m.ref, "merge", "--abort")
 
+	localRefExists, err := notesRefExists(m.ref)
+	if err != nil {
+		return fmt.Errorf("failed to verify local notes ref '%s': %w", m.ref, err)
+	}
+
 	// 1. Fetch remote notes. This updates the remote-tracking ref (e.g., refs/remotes/origin/notes/my_namespace).
 	// We fetch the specific notes ref. If it doesn't exist on the remote, fetch will indicate this.
 	remoteTrackingRef, err := buildRemoteTrackingRef(remoteName, m.ref)
@@ -405,6 +410,13 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 		}
 	}
 
+	if !remoteNotesExist && !localRefExists {
+		if err := initializeEmptyNotesRef(m.ref); err != nil {
+			return fmt.Errorf("failed to initialize notes namespace '%s' for first push: %w", m.ref, err)
+		}
+		localRefExists = true
+	}
+
 	if remoteNotesExist {
 
 		// Save the current local ref before merge attempt (for potential rollback)
@@ -412,6 +424,19 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 		if err != nil {
 			// If local ref doesn't exist yet, that's okay
 			localRefSHA = ""
+		}
+
+		if !localRefExists {
+			remoteSHA, _, err := executeGitCommand("rev-parse", remoteTrackingRef)
+			if err != nil {
+				return fmt.Errorf("failed to resolve remote notes ref '%s' before initializing local ref '%s': %w",
+					remoteTrackingRef, m.ref, err)
+			}
+			if _, _, err := executeGitCommand("update-ref", m.ref, strings.TrimSpace(remoteSHA)); err != nil {
+				return fmt.Errorf("failed to create local notes ref '%s' from remote tracking ref '%s': %w",
+					m.ref, remoteTrackingRef, err)
+			}
+			localRefExists = true
 		}
 
 		// Verify the remote-tracking ref exists (it should if fetch was successful and remote had notes)

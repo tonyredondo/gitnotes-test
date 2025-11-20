@@ -37,10 +37,6 @@ var (
 	// Merge status patterns (case-insensitive)
 	alreadyUpToDatePattern = regexp.MustCompile(`(?i)already up to date`)
 	nothingToMergePattern  = regexp.MustCompile(`(?i)nothing to merge`)
-
-	// SHA validation patterns
-	invalidShaPattern = regexp.MustCompile(`^-|\.\.`)
-	hexCharPattern    = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 )
 
 // ErrorMatcher provides optimized error pattern matching
@@ -78,8 +74,7 @@ func (em *ErrorMatcher) IsRemoteRefNotFoundError(stderr, errStr string) bool {
 func (em *ErrorMatcher) IsNotesRefNotFoundError(errMsg string) bool {
 	return badNotesRefPattern.MatchString(errMsg) ||
 		doesNotExistPattern.MatchString(errMsg) ||
-		noteNotFoundPattern.MatchString(errMsg) ||
-		exitCode1Pattern.MatchString(errMsg)
+		noteNotFoundPattern.MatchString(errMsg)
 }
 
 // IsDeleteNoteNotFoundError checks if delete failed because note doesn't exist
@@ -108,19 +103,14 @@ func (em *ErrorMatcher) IsMergeConflict(mergeStderr string) bool {
 
 // ValidateCommitSHA validates commit SHA format using regex
 func (em *ErrorMatcher) ValidateCommitSHA(sha string) bool {
+	if !isSafeRevisionSpec(sha) {
+		return false
+	}
+
 	if sha == "" {
 		return true // Allow empty, will use HEAD
 	}
 
-	// Check for invalid patterns
-	if invalidShaPattern.MatchString(sha) {
-		return false
-	}
-
-	// Validate length and hex format
-	if len(sha) < 4 || len(sha) > 40 {
-		return false
-	}
-
-	return hexCharPattern.MatchString(sha)
+	_, _, err := executeGitCommand("rev-parse", "--verify", sha)
+	return err == nil
 }
