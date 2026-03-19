@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 var errorMatcher = NewErrorMatcher()
@@ -40,11 +41,19 @@ func extractGitCommandError(err error) *GitCommandError {
 }
 
 type gitCommandHook func(args []string)
+type gitCommandMetricsHook interface {
+	OnCommandStart(args []string)
+	OnCommandEnd(args []string, duration time.Duration, err error)
+}
 
 var (
 	gitHookMu            sync.RWMutex
 	beforeGitCommandHook gitCommandHook
 	afterGitCommandHook  gitCommandHook
+	commandMetricsHook   gitCommandMetricsHook
+
+	gitEnvOnce sync.Once
+	baseGitEnv []string
 )
 
 func runGitCommandHook(before bool, args []string) {
@@ -77,6 +86,50 @@ func setGitCommandHooksForTesting(before, after gitCommandHook) func() {
 	}
 }
 
+func setGitCommandMetricsHookForTesting(hook gitCommandMetricsHook) func() {
+	gitHookMu.Lock()
+	prev := commandMetricsHook
+	commandMetricsHook = hook
+	gitHookMu.Unlock()
+
+	return func() {
+		gitHookMu.Lock()
+		commandMetricsHook = prev
+		gitHookMu.Unlock()
+	}
+}
+
+func runCommandMetricsStart(args []string) {
+	gitHookMu.RLock()
+	hook := commandMetricsHook
+	gitHookMu.RUnlock()
+	if hook != nil {
+		hook.OnCommandStart(args)
+	}
+}
+
+func runCommandMetricsEnd(args []string, duration time.Duration, err error) {
+	gitHookMu.RLock()
+	hook := commandMetricsHook
+	gitHookMu.RUnlock()
+	if hook != nil {
+		hook.OnCommandEnd(args, duration, err)
+	}
+}
+
+func getBaseGitEnv() []string {
+	gitEnvOnce.Do(func() {
+		baseGitEnv = append(
+			os.Environ(),
+			"GIT_AUTHOR_NAME=Library Notes",
+			"GIT_AUTHOR_EMAIL=lib@example.com",
+			"GIT_COMMITTER_NAME=Library Notes",
+			"GIT_COMMITTER_EMAIL=lib@example.com",
+		)
+	})
+	return baseGitEnv
+}
+
 // formatNamespaceRef ensures the namespace has the correct prefix for git.
 // If the namespace already starts with "refs/notes/", it's returned as is.
 // Otherwise, "refs/notes/" is prepended.
@@ -107,20 +160,18 @@ func executeGitCommand(args ...string) (string, string, error) {
 	argsCopy := append([]string(nil), args...)
 	runGitCommandHook(true, argsCopy)
 	defer runGitCommandHook(false, argsCopy)
+	runCommandMetricsStart(argsCopy)
+	start := time.Now()
 
 	cmd := exec.Command("git", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = append(
-		os.Environ(),
-		"GIT_AUTHOR_NAME=Library Notes",
-		"GIT_AUTHOR_EMAIL=lib@example.com",
-		"GIT_COMMITTER_NAME=Library Notes",
-		"GIT_COMMITTER_EMAIL=lib@example.com",
-	)
+	cmd.Env = getBaseGitEnv()
 
 	err := cmd.Run()
+	duration := time.Since(start)
+	runCommandMetricsEnd(argsCopy, duration, err)
 
 	if err != nil {
 		// Check for specific exit codes
@@ -145,20 +196,18 @@ func executeGitCommandContext(ctx context.Context, args ...string) (string, stri
 	argsCopy := append([]string(nil), args...)
 	runGitCommandHook(true, argsCopy)
 	defer runGitCommandHook(false, argsCopy)
+	runCommandMetricsStart(argsCopy)
+	start := time.Now()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = append(
-		os.Environ(),
-		"GIT_AUTHOR_NAME=Library Notes",
-		"GIT_AUTHOR_EMAIL=lib@example.com",
-		"GIT_COMMITTER_NAME=Library Notes",
-		"GIT_COMMITTER_EMAIL=lib@example.com",
-	)
+	cmd.Env = getBaseGitEnv()
 
 	err := cmd.Run()
+	duration := time.Since(start)
+	runCommandMetricsEnd(argsCopy, duration, err)
 
 	if err != nil {
 		// Check if context was cancelled
@@ -180,4 +229,40 @@ func executeGitCommandContext(ctx context.Context, args ...string) (string, stri
 		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
 	}
 	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), nil
+}
+
+// executeGitCommandWithStdin executes a git command and writes stdin before waiting for output.
+func executeGitCommandWithStdin(stdin string, args ...string) (string, string, error) {
+	argsCopy := append([]string(nil), args...)
+	runGitCommandHook(true, argsCopy)
+	defer runGitCommandHook(false, argsCopy)
+	runCommandMetricsStart(argsCopy)
+	start := time.Now()
+
+	cmd := exec.Command("git", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Env = getBaseGitEnv()
+
+	err := cmd.Run()
+	duration := time.Since(start)
+	runCommandMetricsEnd(argsCopy, duration, err)
+
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return stdout.String(), stderr.String(), &GitCommandError{
+				Command:  args[0],
+				Args:     append([]string(nil), args...),
+				ExitCode: exitErr.ExitCode(),
+				Stdout:   strings.TrimSpace(stdout.String()),
+				Stderr:   strings.TrimSpace(stderr.String()),
+				Cause:    err,
+			}
+		}
+		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
+	}
+	return stdout.String(), strings.TrimSpace(stderr.String()), nil
 }

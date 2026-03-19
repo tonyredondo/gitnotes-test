@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,8 +38,13 @@ type NotesManager interface {
 }
 
 type notesManager struct {
-	ref string
+	ref                 string
+	cacheMu             sync.RWMutex
+	noteListCache       []string
+	noteListCacheExpiry time.Time
 }
+
+const noteListCacheTTL = 750 * time.Millisecond
 
 // NewNotesManager creates a new notes manager for the given namespace
 func NewNotesManager(namespace string) NotesManager {
@@ -92,24 +99,37 @@ func (m *notesManager) GetNoteWithContext(ctx context.Context, commitSha string)
 func (m *notesManager) GetNotesBulk(commitShas []string) (map[string]string, map[string]error) {
 	results := make(map[string]string)
 	errors := make(map[string]error)
+	if len(commitShas) == 0 {
+		return results, errors
+	}
 
 	// Validate all SHAs first
+	validShas := make([]string, 0, len(commitShas))
 	for _, sha := range commitShas {
 		if err := validateCommitSHA(sha); err != nil {
 			errors[sha] = err
+			continue
 		}
+		validShas = append(validShas, sha)
 	}
 
-	// Use goroutines with semaphore for parallel fetching
+	// First attempt a batched read via note object lookup + cat-file.
+	// This avoids one git process per SHA in the common case.
+	batchedResults, missingShas, batchErr := m.getNotesByCommitShasBatch(validShas)
+	if batchErr != nil {
+		for _, sha := range validShas {
+			errors[sha] = batchErr
+		}
+		return results, errors
+	}
+	maps.Copy(results, batchedResults)
+
+	// Fallback for SHAs not present in notes list (or unresolved in batch path).
 	sem := make(chan struct{}, 10) // Limit concurrent operations
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	for _, sha := range commitShas {
-		if _, hasError := errors[sha]; hasError {
-			continue // Skip invalid SHAs
-		}
-
+	for _, sha := range missingShas {
 		wg.Add(1)
 		go func(commitSha string) {
 			defer wg.Done()
@@ -160,6 +180,7 @@ func (m *notesManager) SetNote(commitSha, value string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set note for %s in %s (stdout: %s | stderr: %s): %w", commitSha, m.ref, stdout, stderr, err)
 	}
+	m.invalidateNoteListCache()
 	return nil
 }
 
@@ -172,6 +193,10 @@ type commitInfo struct {
 // GetNoteList retrieves a list of commit SHAs that have notes in a given namespace,
 // sorted in reverse chronological order (newest first).
 func (m *notesManager) GetNoteList() ([]string, error) {
+	if cached, ok := m.getCachedNoteList(); ok {
+		return cached, nil
+	}
+
 	listOutput, _, err := executeGitCommand("notes", "--ref", m.ref, "list")
 	if err != nil {
 		if gitErr := extractGitCommandError(err); gitErr != nil && errorMatcher.IsNotesRefNotFoundError(gitErr.ExitCode, gitErr.Stderr) {
@@ -184,19 +209,15 @@ func (m *notesManager) GetNoteList() ([]string, error) {
 		return []string{}, nil
 	}
 
-	// Collect all commit SHAs
-	var commitShas []string
-	shaToNoteObj := make(map[string]string)
+	commitShas := make([]string, 0, strings.Count(listOutput, "\n")+1)
 
 	scanner := bufio.NewScanner(strings.NewReader(listOutput))
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
-			noteObj := parts[0]
 			commitSha := parts[1]
 			commitShas = append(commitShas, commitSha)
-			shaToNoteObj[commitSha] = noteObj
 		}
 	}
 
@@ -241,8 +262,169 @@ func (m *notesManager) GetNoteList() ([]string, error) {
 	for i, ci := range commitsWithNotes {
 		sortedShas[i] = ci.Sha
 	}
+	m.setCachedNoteList(sortedShas)
 
 	return sortedShas, nil
+}
+
+func (m *notesManager) getNotesByCommitShasBatch(commitShas []string) (map[string]string, []string, error) {
+	results := make(map[string]string, len(commitShas))
+	if len(commitShas) == 0 {
+		return results, nil, nil
+	}
+
+	listOutput, _, err := executeGitCommand("notes", "--ref", m.ref, "list")
+	if err != nil {
+		if gitErr := extractGitCommandError(err); gitErr != nil && errorMatcher.IsNotesRefNotFoundError(gitErr.ExitCode, gitErr.Stderr) {
+			return results, append([]string(nil), commitShas...), nil
+		}
+		return nil, nil, fmt.Errorf("failed to list notes in %s: %w", m.ref, err)
+	}
+	if strings.TrimSpace(listOutput) == "" {
+		return results, append([]string(nil), commitShas...), nil
+	}
+
+	commitToNoteObj := parseNoteListToCommitMap(listOutput)
+	noteObjectToCommits := make(map[string][]string, len(commitShas))
+	seenObjects := make(map[string]struct{}, len(commitShas))
+	noteObjectOrder := make([]string, 0, len(commitShas))
+	missingShas := make([]string, 0, len(commitShas))
+	for _, sha := range commitShas {
+		noteObj, ok := commitToNoteObj[sha]
+		if !ok {
+			missingShas = append(missingShas, sha)
+			continue
+		}
+		noteObjectToCommits[noteObj] = append(noteObjectToCommits[noteObj], sha)
+		if _, seen := seenObjects[noteObj]; !seen {
+			noteObjectOrder = append(noteObjectOrder, noteObj)
+			seenObjects[noteObj] = struct{}{}
+		}
+	}
+	if len(noteObjectOrder) == 0 {
+		return results, missingShas, nil
+	}
+
+	stdin := strings.Join(noteObjectOrder, "\n") + "\n"
+	catOutput, _, err := executeGitCommandWithStdin(stdin, "cat-file", "--batch")
+	if err != nil {
+		// fall back to individual lookups for all requested SHAs
+		return results, append([]string(nil), commitShas...), nil
+	}
+
+	parsedResults, parsedObjectIds, err := parseCatFileBatchOutput(catOutput, noteObjectToCommits)
+	if err != nil {
+		// fall back to individual lookups for all requested SHAs
+		return results, append([]string(nil), commitShas...), nil
+	}
+	maps.Copy(results, parsedResults)
+
+	parsedSet := make(map[string]struct{}, len(parsedObjectIds))
+	for _, id := range parsedObjectIds {
+		parsedSet[id] = struct{}{}
+	}
+	for _, noteObj := range noteObjectOrder {
+		if _, ok := parsedSet[noteObj]; !ok {
+			missingShas = append(missingShas, noteObjectToCommits[noteObj]...)
+		}
+	}
+
+	return results, missingShas, nil
+}
+
+func parseNoteListToCommitMap(listOutput string) map[string]string {
+	estimatedLines := strings.Count(listOutput, "\n") + 1
+	commitToNoteObj := make(map[string]string, estimatedLines)
+	scanner := bufio.NewScanner(strings.NewReader(listOutput))
+	for scanner.Scan() {
+		parts := strings.Fields(scanner.Text())
+		if len(parts) >= 2 {
+			commitToNoteObj[parts[1]] = parts[0]
+		}
+	}
+	return commitToNoteObj
+}
+
+func parseCatFileBatchOutput(output string, noteObjectToCommits map[string][]string) (map[string]string, []string, error) {
+	results := make(map[string]string, len(noteObjectToCommits))
+	parsedObjects := make([]string, 0, len(noteObjectToCommits))
+	reader := bufio.NewReader(strings.NewReader(output))
+
+	for {
+		headerLine, err := reader.ReadString('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return nil, nil, fmt.Errorf("cat-file header exceeded scanner buffer")
+		}
+		if err != nil {
+			if headerLine == "" {
+				break
+			}
+			return nil, nil, err
+		}
+
+		headerLine = strings.TrimSpace(headerLine)
+		if headerLine == "" {
+			continue
+		}
+
+		parts := strings.Fields(headerLine)
+		if len(parts) < 3 {
+			return nil, nil, fmt.Errorf("unexpected cat-file header format: %q", headerLine)
+		}
+
+		objectID := parts[0]
+		size, parseErr := strconv.Atoi(parts[2])
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("invalid cat-file object size for %s: %w", objectID, parseErr)
+		}
+
+		content := make([]byte, size)
+		if _, err := io.ReadFull(reader, content); err != nil {
+			return nil, nil, fmt.Errorf("failed reading cat-file payload for %s: %w", objectID, err)
+		}
+
+		// consume trailing newline after payload
+		if _, err := reader.ReadByte(); err != nil {
+			return nil, nil, fmt.Errorf("failed reading cat-file payload terminator for %s: %w", objectID, err)
+		}
+
+		commitShas, ok := noteObjectToCommits[objectID]
+		if ok {
+			noteValue := strings.TrimSpace(string(content))
+			for _, commitSha := range commitShas {
+				results[commitSha] = noteValue
+			}
+			parsedObjects = append(parsedObjects, objectID)
+		}
+	}
+
+	return results, parsedObjects, nil
+}
+
+func (m *notesManager) getCachedNoteList() ([]string, bool) {
+	m.cacheMu.RLock()
+	defer m.cacheMu.RUnlock()
+	if noteListCacheTTL <= 0 || time.Now().After(m.noteListCacheExpiry) || len(m.noteListCache) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), m.noteListCache...), true
+}
+
+func (m *notesManager) setCachedNoteList(values []string) {
+	if noteListCacheTTL <= 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	m.noteListCache = append(m.noteListCache[:0], values...)
+	m.noteListCacheExpiry = time.Now().Add(noteListCacheTTL)
+	m.cacheMu.Unlock()
+}
+
+func (m *notesManager) invalidateNoteListCache() {
+	m.cacheMu.Lock()
+	m.noteListCache = nil
+	m.noteListCacheExpiry = time.Time{}
+	m.cacheMu.Unlock()
 }
 
 // DeleteNote removes a note for a specific commit SHA in a namespace.
@@ -263,6 +445,7 @@ func (m *notesManager) DeleteNote(commitSha string) error {
 		}
 		return fmt.Errorf("failed to delete note for %s in %s (stderr: %s): %w", commitSha, m.ref, stderr, err)
 	}
+	m.invalidateNoteListCache()
 	return nil
 }
 
@@ -333,6 +516,7 @@ func (m *notesManager) FetchNotes(remoteName string) error {
 	// If listErr was not nil or listOutput was empty, the block above is skipped.
 	// The function returns nil, indicating success for the primary operation of fetching the notes ref,
 	// consistent with the original function's behavior.
+	m.invalidateNoteListCache()
 	return nil
 }
 
@@ -466,6 +650,7 @@ func (m *notesManager) pushNotesAttempt(remoteName string) error {
 			m.ref, remoteName, pushErr, pushStderr)
 	}
 
+	m.invalidateNoteListCache()
 	return nil
 }
 
