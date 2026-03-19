@@ -5,16 +5,10 @@ import "regexp"
 // Pre-compiled regex patterns for optimized string processing
 var (
 	// Error detection patterns
-	exitCode1Pattern     = regexp.MustCompile(`exit code 1`)
-	exitCode128Pattern   = regexp.MustCompile(`exit code 128`)
-	exitStatus1Pattern   = regexp.MustCompile(`exit status 1`)
-	exitStatus128Pattern = regexp.MustCompile(`exit status 128`)
-
 	// Note-related error patterns (case-insensitive)
 	noteNotFoundPattern    = regexp.MustCompile(`(?i)no notes? found`)
 	noteNotFoundObjPattern = regexp.MustCompile(`(?i)no note found for object`)
 	objectHasNoNotePattern = regexp.MustCompile(`(?i)object has no note`)
-	failedToGetNotePattern = regexp.MustCompile(`(?i)failed to get note`)
 
 	// Git resolution errors
 	fatalFailedResolvePattern = regexp.MustCompile(`(?i)fatal: failed to resolve`)
@@ -23,10 +17,12 @@ var (
 	remoteRefNotFoundPattern = regexp.MustCompile(`(?i)couldn't find remote ref`)
 	noSuchRefPattern         = regexp.MustCompile(`(?i)no such ref`)
 	invalidRefspecPattern    = regexp.MustCompile(`(?i)fetch-pack: invalid refspec`)
+	remoteUnavailablePattern = regexp.MustCompile(`(?i)does not appear to be a git repository`)
 
 	// Repository state patterns (case-insensitive)
-	badNotesRefPattern  = regexp.MustCompile(`(?i)bad notes ref`)
-	doesNotExistPattern = regexp.MustCompile(`(?i)does not exist`)
+	badNotesRefPattern        = regexp.MustCompile(`(?i)bad notes ref`)
+	unknownNotesRefPattern    = regexp.MustCompile(`(?i)unknown notes ref`)
+	cannotReadNotesRefPattern = regexp.MustCompile(`(?i)cannot read notes`)
 
 	// Push/merge conflict patterns (case-insensitive)
 	nonFastForwardPattern = regexp.MustCompile(`(?i)non-fast-forward`)
@@ -52,47 +48,48 @@ func NewErrorMatcher() *ErrorMatcher {
 }
 
 // IsNoteNotFoundError checks if the error indicates a note was not found
-func (em *ErrorMatcher) IsNoteNotFoundError(errStr, stderr string) bool {
-	return exitCode1Pattern.MatchString(errStr) &&
+func (em *ErrorMatcher) IsNoteNotFoundError(exitCode int, stderr string) bool {
+	return exitCode == 1 &&
 		(noteNotFoundPattern.MatchString(stderr) ||
-			noteNotFoundObjPattern.MatchString(errStr) ||
-			failedToGetNotePattern.MatchString(errStr))
+			noteNotFoundObjPattern.MatchString(stderr))
 }
 
 // IsInvalidCommitError checks if the error indicates an invalid commit SHA
-func (em *ErrorMatcher) IsInvalidCommitError(errStr string) bool {
-	return fatalFailedResolvePattern.MatchString(errStr) ||
-		exitCode128Pattern.MatchString(errStr)
+func (em *ErrorMatcher) IsInvalidCommitError(exitCode int, stderr string) bool {
+	return fatalFailedResolvePattern.MatchString(stderr) || exitCode == 128
 }
 
 // IsRemoteRefNotFoundError checks if the error indicates remote ref doesn't exist
-func (em *ErrorMatcher) IsRemoteRefNotFoundError(stderr, errStr string) bool {
+func (em *ErrorMatcher) IsRemoteRefNotFoundError(exitCode int, stderr string) bool {
 	return (remoteRefNotFoundPattern.MatchString(stderr) ||
 		noSuchRefPattern.MatchString(stderr) ||
-		invalidRefspecPattern.MatchString(stderr) ||
-		(exitStatus1Pattern.MatchString(errStr) && stderr == "") ||
-		exitStatus128Pattern.MatchString(errStr))
+		invalidRefspecPattern.MatchString(stderr)) &&
+		(exitCode == 1 || exitCode == 128)
+}
+
+// IsRemoteUnavailableError checks if the configured remote itself is unavailable.
+func (em *ErrorMatcher) IsRemoteUnavailableError(stderr string) bool {
+	return remoteUnavailablePattern.MatchString(stderr)
 }
 
 // IsNotesRefNotFoundError checks if notes reference doesn't exist
-func (em *ErrorMatcher) IsNotesRefNotFoundError(errMsg string) bool {
-	return badNotesRefPattern.MatchString(errMsg) ||
-		doesNotExistPattern.MatchString(errMsg) ||
-		noteNotFoundPattern.MatchString(errMsg) ||
-		exitCode1Pattern.MatchString(errMsg)
+func (em *ErrorMatcher) IsNotesRefNotFoundError(exitCode int, stderr string) bool {
+	return (badNotesRefPattern.MatchString(stderr) ||
+		unknownNotesRefPattern.MatchString(stderr) ||
+		cannotReadNotesRefPattern.MatchString(stderr) ||
+		noteNotFoundPattern.MatchString(stderr)) && exitCode == 1
 }
 
 // IsDeleteNoteNotFoundError checks if delete failed because note doesn't exist
-func (em *ErrorMatcher) IsDeleteNoteNotFoundError(stderr, errStr string) bool {
-	return objectHasNoNotePattern.MatchString(stderr) ||
-		exitCode1Pattern.MatchString(errStr)
+func (em *ErrorMatcher) IsDeleteNoteNotFoundError(exitCode int, stderr string) bool {
+	return objectHasNoNotePattern.MatchString(stderr) && exitCode == 1
 }
 
 // IsPushRetryableError checks if push error is retryable (due to concurrent changes)
-func (em *ErrorMatcher) IsPushRetryableError(errStr string) bool {
-	return nonFastForwardPattern.MatchString(errStr) ||
-		fetchFirstPattern.MatchString(errStr) ||
-		rejectedPattern.MatchString(errStr)
+func (em *ErrorMatcher) IsPushRetryableError(stderr string) bool {
+	return nonFastForwardPattern.MatchString(stderr) ||
+		fetchFirstPattern.MatchString(stderr) ||
+		rejectedPattern.MatchString(stderr)
 }
 
 // IsMergeUpToDate checks if merge indicates already up to date

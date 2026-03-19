@@ -13,6 +13,32 @@ import (
 
 var errorMatcher = NewErrorMatcher()
 
+// GitCommandError captures structured failure details for git command execution.
+type GitCommandError struct {
+	Command  string
+	Args     []string
+	ExitCode int
+	Stdout   string
+	Stderr   string
+	Cause    error
+}
+
+func (e *GitCommandError) Error() string {
+	return fmt.Sprintf("git %s failed with exit code %d: %v; stderr: %s", e.Command, e.ExitCode, e.Cause, e.Stderr)
+}
+
+func (e *GitCommandError) Unwrap() error {
+	return e.Cause
+}
+
+func extractGitCommandError(err error) *GitCommandError {
+	var gitErr *GitCommandError
+	if errors.As(err, &gitErr) {
+		return gitErr
+	}
+	return nil
+}
+
 type gitCommandHook func(args []string)
 
 var (
@@ -100,8 +126,14 @@ func executeGitCommand(args ...string) (string, string, error) {
 		// Check for specific exit codes
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return stdout.String(), stderr.String(), fmt.Errorf("git %s failed with exit code %d: %w; stderr: %s",
-				args[0], exitErr.ExitCode(), err, stderr.String())
+			return stdout.String(), stderr.String(), &GitCommandError{
+				Command:  args[0],
+				Args:     append([]string(nil), args...),
+				ExitCode: exitErr.ExitCode(),
+				Stdout:   strings.TrimSpace(stdout.String()),
+				Stderr:   strings.TrimSpace(stderr.String()),
+				Cause:    err,
+			}
 		}
 		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
 	}
@@ -136,8 +168,14 @@ func executeGitCommandContext(ctx context.Context, args ...string) (string, stri
 
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return stdout.String(), stderr.String(), fmt.Errorf("git %s failed with exit code %d: %w; stderr: %s",
-				args[0], exitErr.ExitCode(), err, stderr.String())
+			return stdout.String(), stderr.String(), &GitCommandError{
+				Command:  args[0],
+				Args:     append([]string(nil), args...),
+				ExitCode: exitErr.ExitCode(),
+				Stdout:   strings.TrimSpace(stdout.String()),
+				Stderr:   strings.TrimSpace(stderr.String()),
+				Cause:    err,
+			}
 		}
 		return stdout.String(), stderr.String(), fmt.Errorf("git %s failed: %w; stderr: %s", args[0], err, stderr.String())
 	}
