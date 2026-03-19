@@ -56,6 +56,10 @@ func setupTestRepo(t *testing.T) (repoPath string) {
 // Helper function to create a commit in the given repo path.
 // Returns the SHA of the created commit.
 func createTestCommit(t *testing.T, repoPath string, filename string, content string, message string) string {
+	return createTestCommitWithDate(t, repoPath, filename, content, message, "")
+}
+
+func createTestCommitWithDate(t *testing.T, repoPath string, filename string, content string, message string, commitDate string) string {
 	t.Helper()
 	filePath := filepath.Join(repoPath, filename)
 	err := os.WriteFile(filePath, []byte(content), 0644)
@@ -63,7 +67,23 @@ func createTestCommit(t *testing.T, repoPath string, filename string, content st
 		t.Fatalf("Failed to write file %s: %v", filePath, err)
 	}
 	runCmd(t, repoPath, "git", "add", filename)
-	runCmd(t, repoPath, "git", "commit", "-m", message)
+	if commitDate == "" {
+		runCmd(t, repoPath, "git", "commit", "-m", message)
+	} else {
+		cmd := exec.Command("git", "commit", "-m", message)
+		cmd.Dir = repoPath
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_DATE="+commitDate,
+			"GIT_COMMITTER_DATE="+commitDate,
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Logf("Command `git commit -m %q` in dir `%s` failed. Stderr: %s\nStdout: %s", message, repoPath, stderr.String(), stdout.String())
+			t.Fatalf("Command git commit failed in dir %s: %v", repoPath, err)
+		}
+	}
 	sha, _ := runCmd(t, repoPath, "git", "rev-parse", "HEAD")
 	return sha
 }
@@ -215,20 +235,9 @@ func TestGitNoteOperations(t *testing.T) {
 		c1Msg := "Commit 1 message"
 
 		// sha1 will be oldest, sha3 will be newest.
-		// Ensure sufficient delay for distinct timestamps (Git timestamps are usually per second)
-		sha1 := createTestCommit(t, repoPath, "file_s1.txt", c1Content, c1Msg)
-		t.Logf("Created sha1: %s at %s", sha1, time.Now()) // Optional: Log creation time for debugging
-
-		// Sleep for more than 1 second to ensure the next commit gets a new timestamp
-		time.Sleep(1*time.Second + 200*time.Millisecond)
-
-		sha2 := createTestCommit(t, repoPath, "file_s2.txt", "content for commit 2", "Commit 2 message")
-		t.Logf("Created sha2: %s at %s", sha2, time.Now()) // Optional: Log
-
-		time.Sleep(1*time.Second + 200*time.Millisecond)
-
-		sha3 := createTestCommit(t, repoPath, "file_s3.txt", "content for commit 3", "Commit 3 message")
-		t.Logf("Created sha3: %s at %s", sha3, time.Now()) // Optional: Log
+		sha1 := createTestCommitWithDate(t, repoPath, "file_s1.txt", c1Content, c1Msg, "2023-01-01T00:00:01Z")
+		sha2 := createTestCommitWithDate(t, repoPath, "file_s2.txt", "content for commit 2", "Commit 2 message", "2023-01-01T00:00:02Z")
+		sha3 := createTestCommitWithDate(t, repoPath, "file_s3.txt", "content for commit 3", "Commit 3 message", "2023-01-01T00:00:03Z")
 
 		// ... rest of the test ...
 		// (Clean up notes, SetNotes, GetNoteList call, assertions)
@@ -477,8 +486,8 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] for non-existent namespace failed: %v", err)
 		}
-		if retrievedSlice != nil && len(retrievedSlice) != 0 {
-			t.Errorf("GetNoteJSON[MyCustomData] for non-existent namespace: expected nil or empty slice, got %d elements: %+v", len(retrievedSlice), retrievedSlice)
+		if retrievedSlice == nil || len(retrievedSlice) != 0 {
+			t.Errorf("GetNoteJSON[MyCustomData] for non-existent namespace: expected empty non-nil slice, got %+v", retrievedSlice)
 		}
 	})
 
@@ -491,8 +500,8 @@ func TestGitNoteJSONGenericOperations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetNoteJSON[MyCustomData] for empty note content failed: %v", err)
 		}
-		if retrievedSlice != nil && len(retrievedSlice) != 0 {
-			t.Errorf("GetNoteJSON[MyCustomData] for empty note content: expected nil or empty slice, got %d elements", len(retrievedSlice))
+		if retrievedSlice == nil || len(retrievedSlice) != 0 {
+			t.Errorf("GetNoteJSON[MyCustomData] for empty note content: expected empty non-nil slice, got %+v", retrievedSlice)
 		}
 	})
 
@@ -657,8 +666,58 @@ func TestGitNoteRemoteOperations(t *testing.T) {
 
 	t.Run("FetchFromNonExistentRemote_String", func(t *testing.T) {
 		err := manager.FetchNotes("nonexistentremote")
+		if err == nil {
+			t.Error("FetchNotes from non-existent remote should fail, but it did not")
+		}
+	})
+
+	t.Run("FetchNotesReturnsErrorWhenReferencedCommitMissingOnRemote", func(t *testing.T) {
+		missingCommitNamespace := "remote-ops-namespace-missing-commit"
+		missingCommitManager := NewNotesManager(missingCommitNamespace)
+
+		// Create a commit only in local, do not push it to remote main branch.
+		localOnlyCommit := createTestCommit(t, localRepoPath, "local_only.txt", "local only content", "Local-only commit for fetch notes test")
+		noteContentLocalOnly := "note referencing local-only commit"
+
+		if err := missingCommitManager.SetNote(localOnlyCommit, noteContentLocalOnly); err != nil {
+			t.Fatalf("SetNote for local-only commit failed: %v", err)
+		}
+
+		// Push only the notes reference; the remote will not have the commit object.
+		if err := missingCommitManager.PushNotes("testorigin"); err != nil {
+			t.Fatalf("PushNotes for local-only commit note failed: %v", err)
+		}
+
+		// Fresh clone to ensure local repository does not have the local-only commit object.
+		consumerRepoPath, errClone := os.MkdirTemp("", "testrepo-fetch-missing-commit-")
+		if errClone != nil {
+			t.Fatalf("Failed to create temp dir for consumer clone: %v", errClone)
+		}
+		defer os.RemoveAll(consumerRepoPath)
+		runCmd(t, "", "git", "clone", remoteRepoDir, consumerRepoPath)
+		runCmd(t, consumerRepoPath, "git", "config", "user.email", "test@example.com")
+		runCmd(t, consumerRepoPath, "git", "config", "user.name", "Test User")
+
+		cwdBeforeConsumer, err := os.Getwd()
 		if err != nil {
-			t.Error("FetchNotes from non-existent remote should not have failed, but it did")
+			t.Fatalf("Failed to get cwd before consumer clone operations: %v", err)
+		}
+		if err := os.Chdir(consumerRepoPath); err != nil {
+			t.Fatalf("Failed to change directory to consumer clone: %v", err)
+		}
+		defer func() {
+			if err := os.Chdir(cwdBeforeConsumer); err != nil {
+				t.Fatalf("Failed to restore working directory after consumer clone operations: %v", err)
+			}
+		}()
+
+		consumerManager := NewNotesManager(missingCommitNamespace)
+		err = consumerManager.FetchNotes("origin")
+		if err == nil {
+			t.Fatal("FetchNotes should fail when notes reference commits missing on remote")
+		}
+		if !strings.Contains(err.Error(), "failed to fetch") {
+			t.Fatalf("FetchNotes error should indicate missing commit fetch failure, got: %v", err)
 		}
 	})
 

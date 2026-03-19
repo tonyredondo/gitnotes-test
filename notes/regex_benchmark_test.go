@@ -70,7 +70,7 @@ func BenchmarkNoteNotFoundErrorNew(b *testing.B) {
 	matcher := NewErrorMatcher()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = matcher.IsNoteNotFoundError(testErrorStr, testStderr)
+		_ = matcher.IsNoteNotFoundError(1, testStderr)
 	}
 }
 
@@ -85,7 +85,7 @@ func BenchmarkRemoteRefErrorNew(b *testing.B) {
 	matcher := NewErrorMatcher()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = matcher.IsRemoteRefNotFoundError(testRemoteStderr, testRemoteErrStr)
+		_ = matcher.IsRemoteRefNotFoundError(128, testRemoteStderr)
 	}
 }
 
