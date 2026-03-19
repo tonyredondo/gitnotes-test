@@ -38,7 +38,7 @@ type NotesManager interface {
 }
 
 type notesManager struct {
-	ref string
+	ref                 string
 	cacheMu             sync.RWMutex
 	noteListCache       []string
 	noteListCacheExpiry time.Time
@@ -285,7 +285,8 @@ func (m *notesManager) getNotesByCommitShasBatch(commitShas []string) (map[strin
 	}
 
 	commitToNoteObj := parseNoteListToCommitMap(listOutput)
-	noteObjectToCommit := make(map[string]string, len(commitShas))
+	noteObjectToCommits := make(map[string][]string, len(commitShas))
+	seenObjects := make(map[string]struct{}, len(commitShas))
 	noteObjectOrder := make([]string, 0, len(commitShas))
 	missingShas := make([]string, 0, len(commitShas))
 	for _, sha := range commitShas {
@@ -294,8 +295,11 @@ func (m *notesManager) getNotesByCommitShasBatch(commitShas []string) (map[strin
 			missingShas = append(missingShas, sha)
 			continue
 		}
-		noteObjectToCommit[noteObj] = sha
-		noteObjectOrder = append(noteObjectOrder, noteObj)
+		noteObjectToCommits[noteObj] = append(noteObjectToCommits[noteObj], sha)
+		if _, seen := seenObjects[noteObj]; !seen {
+			noteObjectOrder = append(noteObjectOrder, noteObj)
+			seenObjects[noteObj] = struct{}{}
+		}
 	}
 	if len(noteObjectOrder) == 0 {
 		return results, missingShas, nil
@@ -308,7 +312,7 @@ func (m *notesManager) getNotesByCommitShasBatch(commitShas []string) (map[strin
 		return results, append([]string(nil), commitShas...), nil
 	}
 
-	parsedResults, parsedObjectIds, err := parseCatFileBatchOutput(catOutput, noteObjectToCommit)
+	parsedResults, parsedObjectIds, err := parseCatFileBatchOutput(catOutput, noteObjectToCommits)
 	if err != nil {
 		// fall back to individual lookups for all requested SHAs
 		return results, append([]string(nil), commitShas...), nil
@@ -321,7 +325,7 @@ func (m *notesManager) getNotesByCommitShasBatch(commitShas []string) (map[strin
 	}
 	for _, noteObj := range noteObjectOrder {
 		if _, ok := parsedSet[noteObj]; !ok {
-			missingShas = append(missingShas, noteObjectToCommit[noteObj])
+			missingShas = append(missingShas, noteObjectToCommits[noteObj]...)
 		}
 	}
 
@@ -341,9 +345,9 @@ func parseNoteListToCommitMap(listOutput string) map[string]string {
 	return commitToNoteObj
 }
 
-func parseCatFileBatchOutput(output string, noteObjectToCommit map[string]string) (map[string]string, []string, error) {
-	results := make(map[string]string, len(noteObjectToCommit))
-	parsedObjects := make([]string, 0, len(noteObjectToCommit))
+func parseCatFileBatchOutput(output string, noteObjectToCommits map[string][]string) (map[string]string, []string, error) {
+	results := make(map[string]string, len(noteObjectToCommits))
+	parsedObjects := make([]string, 0, len(noteObjectToCommits))
 	reader := bufio.NewReader(strings.NewReader(output))
 
 	for {
@@ -374,19 +378,22 @@ func parseCatFileBatchOutput(output string, noteObjectToCommit map[string]string
 			return nil, nil, fmt.Errorf("invalid cat-file object size for %s: %w", objectID, parseErr)
 		}
 
-			content := make([]byte, size)
-			if _, err := io.ReadFull(reader, content); err != nil {
-				return nil, nil, fmt.Errorf("failed reading cat-file payload for %s: %w", objectID, err)
-			}
+		content := make([]byte, size)
+		if _, err := io.ReadFull(reader, content); err != nil {
+			return nil, nil, fmt.Errorf("failed reading cat-file payload for %s: %w", objectID, err)
+		}
 
 		// consume trailing newline after payload
 		if _, err := reader.ReadByte(); err != nil {
 			return nil, nil, fmt.Errorf("failed reading cat-file payload terminator for %s: %w", objectID, err)
 		}
 
-		commitSha, ok := noteObjectToCommit[objectID]
+		commitShas, ok := noteObjectToCommits[objectID]
 		if ok {
-			results[commitSha] = string(content)
+			noteValue := strings.TrimSpace(string(content))
+			for _, commitSha := range commitShas {
+				results[commitSha] = noteValue
+			}
 			parsedObjects = append(parsedObjects, objectID)
 		}
 	}

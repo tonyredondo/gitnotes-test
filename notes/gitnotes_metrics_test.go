@@ -80,11 +80,11 @@ func TestGetNotesBulk_UsesBatchPathWithoutFallback(t *testing.T) {
 	}
 	commitToObj := parseNoteListToCommitMap(listOutput)
 	objects := make([]string, 0, len(shas))
-	objToCommit := make(map[string]string, len(shas))
+	objToCommit := make(map[string][]string, len(shas))
 	for _, sha := range shas {
 		obj := commitToObj[sha]
 		objects = append(objects, obj)
-		objToCommit[obj] = sha
+		objToCommit[obj] = append(objToCommit[obj], sha)
 	}
 	catOutput, _, err := executeGitCommandWithStdin(strings.Join(objects, "\n")+"\n", "cat-file", "--batch")
 	if err != nil {
@@ -108,5 +108,75 @@ func TestGetNotesBulk_UsesBatchPathWithoutFallback(t *testing.T) {
 	}
 	if strings.Contains(metrics, "notes show") {
 		t.Fatalf("expected no fallback notes show calls, got: %s", metrics)
+	}
+}
+
+func TestGetNotesBulk_ReturnsAllCommitsWithSharedNoteObject(t *testing.T) {
+	repoPath := setupTestRepo(t)
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(originalCwd) }()
+
+	manager := NewNotesManager("shared-note-object")
+	sha1 := createTestCommit(t, repoPath, "shared-1.txt", "first", "first")
+	sha2 := createTestCommit(t, repoPath, "shared-2.txt", "second", "second")
+
+	const sameNote = "same-content"
+	if err := manager.SetNote(sha1, sameNote); err != nil {
+		t.Fatalf("SetNote sha1 failed: %v", err)
+	}
+	if err := manager.SetNote(sha2, sameNote); err != nil {
+		t.Fatalf("SetNote sha2 failed: %v", err)
+	}
+
+	results, errs := manager.GetNotesBulk([]string{sha1, sha2})
+	if len(errs) > 0 {
+		t.Fatalf("GetNotesBulk returned errors: %v", errs)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 bulk results, got %d (%v)", len(results), results)
+	}
+	if results[sha1] != sameNote {
+		t.Fatalf("unexpected note for sha1: %q", results[sha1])
+	}
+	if results[sha2] != sameNote {
+		t.Fatalf("unexpected note for sha2: %q", results[sha2])
+	}
+}
+
+func TestGetNotesBulk_MatchesGetNoteOutputFormatting(t *testing.T) {
+	repoPath := setupTestRepo(t)
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(originalCwd) }()
+
+	manager := NewNotesManager("normalized-bulk-output")
+	sha := createTestCommit(t, repoPath, "formatting.txt", "content", "content")
+	if err := manager.SetNote(sha, "same-content"); err != nil {
+		t.Fatalf("SetNote failed: %v", err)
+	}
+
+	single, err := manager.GetNote(sha)
+	if err != nil {
+		t.Fatalf("GetNote failed: %v", err)
+	}
+
+	results, errs := manager.GetNotesBulk([]string{sha})
+	if len(errs) > 0 {
+		t.Fatalf("GetNotesBulk returned errors: %v", errs)
+	}
+	bulk := results[sha]
+	if bulk != single {
+		t.Fatalf("bulk note %q did not match GetNote output %q", bulk, single)
 	}
 }
