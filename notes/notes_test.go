@@ -15,7 +15,7 @@ import (
 )
 
 // Helper function to execute a command in a specific directory
-func runCmd(t *testing.T, dir string, command string, args ...string) (string, string) {
+func runCmd(t testing.TB, dir string, command string, args ...string) (string, string) {
 	t.Helper()
 	cmd := exec.Command(command, args...)
 	if dir != "" {
@@ -36,7 +36,7 @@ func runCmd(t *testing.T, dir string, command string, args ...string) (string, s
 // Helper function to setup a temporary git repository.
 // It initializes git, sets user.name and user.email, and creates an initial commit.
 // Returns the path to the repo and a cleanup function.
-func setupTestRepo(t *testing.T) (repoPath string) {
+func setupTestRepo(t testing.TB) (repoPath string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "testrepo-gitnotes-")
 	if err != nil {
@@ -55,11 +55,11 @@ func setupTestRepo(t *testing.T) (repoPath string) {
 
 // Helper function to create a commit in the given repo path.
 // Returns the SHA of the created commit.
-func createTestCommit(t *testing.T, repoPath string, filename string, content string, message string) string {
+func createTestCommit(t testing.TB, repoPath string, filename string, content string, message string) string {
 	return createTestCommitWithDate(t, repoPath, filename, content, message, "")
 }
 
-func createTestCommitWithDate(t *testing.T, repoPath string, filename string, content string, message string, commitDate string) string {
+func createTestCommitWithDate(t testing.TB, repoPath string, filename string, content string, message string, commitDate string) string {
 	t.Helper()
 	filePath := filepath.Join(repoPath, filename)
 	err := os.WriteFile(filePath, []byte(content), 0644)
